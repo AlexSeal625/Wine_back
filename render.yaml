@@ -1,0 +1,32 @@
+databases:
+  - name: wine-db
+    databaseName: wine_db
+    user: wine_user
+    plan: free # бесплатный тариф (можно изменить на нужный)
+
+services:
+  - type: web
+    name: wine-backend
+    env: docker # Render автоматически найдет ваш Dockerfile
+    plan: free
+    envVars:
+      # Render автоматически сгенерирует пароль и хост,
+      # поэтому мы передаем их в ваше приложение динамически
+      - key: POSTGRES_DB
+        value: wine_db
+      - key: POSTGRES_USER
+        value: wine_user
+      - key: POSTGRES_PASSWORD
+        fromDatabase:
+          name: wine-db
+          property: password
+      - key: POSTGRES_HOST
+        fromDatabase:
+          name: wine-db
+          property: host
+      # Если ваш код в main.py использует единую строку подключения (DSN), 
+      # раскомментируйте блок ниже:
+      # - key: DATABASE_URL
+      #   fromDatabase:
+      #     name: wine-db
+      #     property: connectionString
