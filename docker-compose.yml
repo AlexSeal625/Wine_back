@@ -1,0 +1,26 @@
+#все контейнеры, из которых состоит приложение
+services:
+  #сервис базы данных
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: wine_db
+      POSTGRES_USER: wine_user
+      POSTGRES_PASSWORD: wine_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+  #сервис сервера
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    volumes:
+      - .:/app
+#постоянные volumes, объявление имени виртуального диска, который создаст docker для хранения файлов
+volumes:
+  postgres_data:
