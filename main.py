@@ -64,6 +64,8 @@ async def lifespan(app: FastAPI):
         cursor.close()
         conn.close()
         print(" Таблицы SQL успешно инициализированы!")
+    except Exception as e:
+        print(f" Ошибка инициализации БД: {e}")
     yield
     print(" Сервер останавливается.")
 
