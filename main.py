@@ -116,7 +116,7 @@ async def recognize_wine(data: ImageRequest):
     try:
         conn = get_db_connection()
         cursor=conn.cursor()
-        cursor.execute("SELECT wine_slug, name FROM wines WHERE id =%s;", (wine_id,))
+        cursor.execute("SELECT wine_slug FROM wines WHERE id =%s;", (wine_id,))
         result = cursor.fetchone()
         cursor.close()
         conn.close()
