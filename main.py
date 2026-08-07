@@ -136,7 +136,7 @@ async def recognize_wine(data: ImageRequest):
         if not result:
             raise Exception(f"Индекс {wine_id} есть в faiss, но записи с таким id нет в таблице sql")
 
-        wine_slug = result
+        wine_slug = result[2:-3]
         wine_url=f"https://vino-svoe.ru/wines/{wine_slug}"
         print(f" вино успешно извлечено slug'{wine_slug}'", flush =True)
     except Exception as e:
