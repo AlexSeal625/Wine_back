@@ -83,10 +83,10 @@ class ImageRequest(BaseModel):
 
 def get_db_connection():
     return psycopg2.connect(
-    host="db",
-    database="wine_db",
+    host="dpg-d9q8f6rm8hqs73e6hbp0-a",
+    database="wine_db_p4pv",
     user="wine_user",
-    password="wine_password"
+    password="rSnOHgBrVlYBsTJGz4A0qAJWQ9Bd56xi"
     )
 print("Ожидание запросов\n", flush=True)
 # обработка запросов
