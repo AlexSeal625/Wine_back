@@ -53,9 +53,19 @@ async def lifespan(app: FastAPI):
     if not os.path.exists(INDEX_FILE_PATH):
         raise FileNotFoundError(f"Файл индекса {INDEX_FILE_PATH} не найден!")
     index = faiss.read_index(INDEX_FILE_PATH)
-    print(f"✅ База FAISS успешно загружена! Всего векторов в базе: {index.ntotal}")
+    print(f" База FAISS успешно загружена! Всего векторов в базе: {index.ntotal}")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        with open("init.sql", "r", encoding="utf-8") as f:
+            sql_script = f.read()
+        cursor.execute(sql_script)
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print(" Таблицы SQL успешно инициализированы!")
     yield
-    print("🛑 Сервер останавливается.")
+    print(" Сервер останавливается.")
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
@@ -71,10 +81,10 @@ class ImageRequest(BaseModel):
 
 def get_db_connection():
     return psycopg2.connect(
-    host="dpg-d9q8f6rm8hqs73e6hbp0-a",
-    database="wine_db_p4pv",
+    host="db",
+    database="wine_db",
     user="wine_user",
-    password="rSnOHgBrVlYBsTJGz4A0qAJWQ9Bd56xi"
+    password="wine_password"
     )
 print("Ожидание запросов\n", flush=True)
 # обработка запросов
@@ -116,7 +126,7 @@ async def recognize_wine(data: ImageRequest):
     try:
         conn = get_db_connection()
         cursor=conn.cursor()
-        cursor.execute("SELECT wine_slug FROM wines WHERE id =%s;", (wine_id,))
+        cursor.execute("SELECT wine_slug, name FROM wines WHERE id =%s;", (wine_id,))
         result = cursor.fetchone()
         cursor.close()
         conn.close()
