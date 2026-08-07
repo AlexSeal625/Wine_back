@@ -1,6 +1,6 @@
 databases:
-  - name: wine-db
-    databaseName: wine_db
+  - name: wine_db_p4pv
+    databaseName: wine_db_p4pv
     user: wine_user
     plan: free # бесплатный тариф (можно изменить на нужный)
 
@@ -13,16 +13,16 @@ services:
       # Render автоматически сгенерирует пароль и хост,
       # поэтому мы передаем их в ваше приложение динамически
       - key: POSTGRES_DB
-        value: wine_db
+        value: wine_db_p4pv
       - key: POSTGRES_USER
         value: wine_user
       - key: POSTGRES_PASSWORD
         fromDatabase:
-          name: wine-db
+          name: wine_db_p4pv
           property: password
       - key: POSTGRES_HOST
         fromDatabase:
-          name: wine-db
+          name: wine_db_p4pv
           property: host
       # Если ваш код в main.py использует единую строку подключения (DSN), 
       # раскомментируйте блок ниже:
