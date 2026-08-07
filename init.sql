@@ -1224,6 +1224,6 @@ INSERT INTO wines(id, wine_slug) VALUES
 (1217, 'fanagoriya-dekanter-merlo-2018-krasnoe-suhoe-14'),
 (1218, 'chateau-tamagne-signature-saperavi'),
 (1219, 'fanagoriya-brule-cabernet-franc-polusuhoe-rozovoe-kaberne-fran-12'),
-(1220, 'vinodelnya-gunko-risling-beloe-suhoe-133'),
+(1220, 'vinodelnya-gunko-risling-beloe-suhoe-133')
 ON CONFLICT DO NOTHING;
 
