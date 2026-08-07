@@ -71,7 +71,7 @@ class ImageRequest(BaseModel):
 
 def get_db_connection():
     return psycopg2.connect(
-    host="db",
+    host="dpg-d9q8f6rm8hqs73e6hbp0-a",
     database="wine_db",
     user="wine_user",
     password="wine_password"
