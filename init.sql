@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS wines(
     id INT PRIMARY KEY,
-    wine_slug VARCHAR(255) NOT NULL,
+    wine_slug VARCHAR(255) NOT NULL
 );
 
 INSERT INTO wines(id, wine_slug) VALUES
