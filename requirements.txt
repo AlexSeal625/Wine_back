@@ -7,3 +7,4 @@ beautifulsoup4
 pydantic
 async-timeout
 cv2
+onnxruntime
