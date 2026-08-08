@@ -166,7 +166,11 @@ async def recognize_wine(data: ImageRequest):
         "status": "success",
         "url": wine_url,
         "parsed_data":{
-            "description":description
+              "wine_name": "Château Example Grand Cru 2019",
+              "public_rating": 4.3,
+              "guide_rating": 87.5,
+              "short_info": description,
+              "gigachat_insights": "Насыщенный букет с нотами чёрной смородины и ванили, танины хорошо структурированы..."
         }
     }
 if __name__ == "__main__":
