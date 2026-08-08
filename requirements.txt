@@ -6,5 +6,5 @@ requests
 beautifulsoup4
 pydantic
 async-timeout
-opencv-python
+opencv-python-headless
 onnxruntime
