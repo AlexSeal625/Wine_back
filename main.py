@@ -114,7 +114,7 @@ async def recognize_wine(data: ImageRequest):
         print(session)
         input_name = session.get_inputs()[0].name
 
-        orig_h, orig_w = image.shape[:2]
+        orig_h, orig_w = image.size
 
         resized_image = cv2.resize(image, (input_width, input_height))
         input_tensor = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
