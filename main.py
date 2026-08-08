@@ -29,6 +29,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"[Прогноз] использование устройства:{device}", flush=True)
 
 try:
+    session = ort.InferenceSession("label_detector.onnx", providers=["CPUExecutionProvider"])
+    input_name = session.get_inputs()[0].name
     model = models.efficientnet_b0(pretrained=True) #стандартная предобученная модель EfficientNet
     model = torch.nn.Sequential(*(list(model.children())[:-1]))
     model.eval() #режим оценивания
@@ -106,57 +108,72 @@ async def recognize_wine(data: ImageRequest):
         raise HTTPException(status_code=400, detail=error_msg)
 
     try:
-        input_width = 640
-        input_height = 640
+    input_width = 640
+    input_height = 640
 
-        print(1)
-        session = ort.InferenceSession("label_detector.onnx", providers=["CPUExecutionProvider"])
-        print(session)
-        input_name = session.get_inputs()[0].name
+    # 1. Загрузка ONNX сессии
+    
 
-        orig_h, orig_w = image.size
+    # 2. Правильно получаем размеры PIL изображения (width, height)
+    orig_w, orig_h = image.size
 
-        resized_image = cv2.resize(image, (input_width, input_height))
-        input_tensor = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
-        input_tensor = input_tensor.astype(np.float32) / 255.0
-        input_tensor = np.transpose(input_tensor, (2, 0, 1))
-        input_tensor = np.expand_dims(input_tensor, axis=0)
+    # 3. Конвертируем PIL в NumPy array для OpenCV
+    img_np = np.array(image)
 
-        outputs = session.run(None, {input_name: input_tensor})
-        prediction = outputs[0] 
+    # 4. Ресайз и подготовка тензора для YOLO
+    resized_image = cv2.resize(img_np, (input_width, input_height))
+    input_tensor = resized_image.astype(np.float32) / 255.0
+    input_tensor = np.transpose(input_tensor, (2, 0, 1))
+    input_tensor = np.expand_dims(input_tensor, axis=0)
 
-        print("Инференс выполнен успешно. Формат вывода:", prediction.shape)
-       
-        pred = prediction[0] 
-        if pred.shape[0] < pred.shape[1]:
-            pred = pred.T
-            
-            scores = np.max(pred[:, 4:], axis=1)
-            best_idx = np.argmax(scores)
-            box = pred[best_idx, :4]
-            xc, yc, w, h = box
+    # 5. Запуск модели
+    outputs = session.run(None, {input_name: input_tensor})
+    prediction = outputs[0]  
 
-            xc = xc * (orig_w )
-            yc = yc * (orig_h)
-            w = w * (orig_w )
-            h = h * (orig_h)
+    print("Инференс выполнен успешно. Формат вывода:", prediction.shape)
 
-            x_min = int(xc - w / 2)
-            y_min = int(yc - h / 2)
-            x_max = int(xc + w / 2)
-            y_max = int(yc + h / 2)
+    # 6. Приводим матрицу к виду (8400, N)
+    pred = prediction[0] 
+    if pred.shape[0] < pred.shape[1]:
+        pred = pred.T
 
-            x_min = max(0, x_min)
-            y_min = max(0, y_min)
-            x_max = min(orig_w, x_max)
-            y_max = min(orig_h, y_max)
+    # 7. Извлекаем лучшие предсказания (вынесено из-под if!)
+    scores = np.max(pred[:, 4:], axis=1)
+    best_idx = np.argmax(scores)
+    
+    # Порог уверенности (например, > 25%)
+    if scores[best_idx] > 0.25:
+        box = pred[best_idx, :4]
+        xc, yc, w, h = box
 
-            if x_max > x_min and y_max > y_min:
-                image = image[y_min:y_max, x_min:x_max]
-    except Exception as e:
-        error_msg = f"YOLO не смогла:{str(e)}"
-        print(error_msg, flush=True)
-        raise HTTPException(status_code=500, detail=error_msg)
+        # 8. Пересчет координат из 640x640 в оригинальный размер картинки
+        scale_x = orig_w / input_width
+        scale_y = orig_h / input_height
+
+        xc = xc * scale_x
+        yc = yc * scale_y
+        w = w * scale_x
+        h = h * scale_y
+
+        x_min = int(xc - w / 2)
+        y_min = int(yc - h / 2)
+        x_max = int(xc + w / 2)
+        y_max = int(yc + h / 2)
+
+        # Ограничиваем рамки пределами изображения
+        x_min = max(0, x_min)
+        y_min = max(0, y_min)
+        x_max = min(orig_w, x_max)
+        y_max = min(orig_h, y_max)
+
+        # 9. Кропаем оригинальный PIL Image
+        if x_max > x_min and y_max > y_min:
+            image = image.crop((x_min, y_min, x_max, y_max))
+
+except Exception as e:
+    error_msg = f"YOLO не смогла: {str(e)}"
+    print(error_msg, flush=True)
+    raise HTTPException(status_code=500, detail=error_msg)
     ####################################################################################################################
     try:
         tensor = transform(image).unsqueeze(0).to(device)
