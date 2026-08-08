@@ -166,7 +166,7 @@ async def recognize_wine(data: ImageRequest):
         "status": "success",
         "url": wine_url,
         "parsed_data":{
-              "wine_name": "Château Example Grand Cru 2019",
+              "wine_name": wine_slug,
               "public_rating": 4.3,
               "guide_rating": 87.5,
               "short_info": description,
