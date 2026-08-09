@@ -96,7 +96,7 @@ def get_db_connection():
     )
 print("Ожидание запросов\n", flush=True)
 # обработка запросов
-@app.post("/api/recognize")
+
 # выносим тяжелую математику в отдельную синхронную функцию
 def run_ml_pipeline(image, orig_w, orig_h, input_width, input_height):
     # 3. Конвертируем PIL в NumPy array для OpenCV
