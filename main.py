@@ -239,7 +239,9 @@ async def recognize_wine(data: ImageRequest):
     return Response(
         content=json_bytes,
         media_type="application/json",
-        headers={"Content-Length": str(len(json_bytes))}
+        headers={"Content-Length": str(len(json_bytes)),
+                "Cache-Control": "no-transform"
+                }
     )
 if __name__ == "__main__":
     import uvicorn
