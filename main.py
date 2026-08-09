@@ -22,6 +22,8 @@ import psycopg2
 import numpy as np
 import cv2
 import onnxruntime as ort
+import json
+from fastapi.responses import Response
 
 app= FastAPI() #под запросы
 print("Start")
@@ -95,156 +97,150 @@ def get_db_connection():
 print("Ожидание запросов\n", flush=True)
 # обработка запросов
 @app.post("/api/recognize")
-async def recognize_wine(data: ImageRequest):
-    print("\n начало обработки", flush = True)
+# выносим тяжелую математику в отдельную синхронную функцию
+def run_ml_pipeline(image, orig_w, orig_h, input_width, input_height):
+    # 3. Конвертируем PIL в NumPy array для OpenCV
+    img_np = np.array(image)
+    
+    # 4. Ресайз и подготовка тензора для YOLO
+    resized_image = cv2.resize(img_np, (input_width, input_height))
+    input_tensor = resized_image.astype(np.float32) / 255.0
+    input_tensor = np.transpose(input_tensor, (2, 0, 1))
+    input_tensor = np.expand_dims(input_tensor, axis=0)
+    
+    # 5. Запуск модели
+    outputs = session.run(None, {input_name: input_tensor})
+    prediction = outputs[0]  
+    
+    # 6. Приводим матрицу к виду (8400, N)
+    pred = prediction[0] 
+    if pred.shape[0] < pred.shape[1]:
+        pred = pred.T
+    
+    # 7. Извлекаем лучшие предсказания
+    scores = np.max(pred[:, 4:], axis=1)
+    best_idx = np.argmax(scores)
+    
+    # Порог уверенности
+    if scores[best_idx] > 0.25:
+        box = pred[best_idx, :4]
+        xc, yc, w, h = box
+        
+        # 8. Пересчет координат
+        scale_x = orig_w / input_width
+        scale_y = orig_h / input_height
+        xc = xc * scale_x
+        yc = yc * scale_y
+        w = w * scale_x
+        h = h * scale_y
+        
+        x_min = max(0, int(xc - w / 2))
+        y_min = max(0, int(yc - h / 2))
+        x_max = min(orig_w, int(xc + w / 2))
+        y_max = min(orig_h, int(yc + h / 2))
+        
+        # 9. Кропаем
+        if x_max > x_min and y_max > y_min:
+            image = image.crop((x_min, y_min, x_max, y_max))
+
+    # Извлечение фичей
+    tensor = transform(image).unsqueeze(0).to(device)
+    with torch.no_grad():
+        embedding = model(tensor).flatten().cpu().numpy().astype('float32')
+        
+    # Поиск в FAISS
+    dist, indecs = index.search(np.array([embedding]), k=1)
+    wine_id = int(indecs[0][0])
+    distance = float(dist[0][0])
+    
+    if wine_id == -1:
+        raise Exception("FAISS не нашёл совпадений")
+        
+    return wine_id, distance
+
+# выносим сеть и БД в отдельную синхронную функцию
+def fetch_wine_data(wine_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT wine_slug FROM wines WHERE id =%s;", (wine_id,))
+    result = cursor.fetchone()
+    cursor.close()
+    conn.close()
+
+    if not result:
+        raise Exception(f"Индекс {wine_id} есть в faiss, но записи с таким id нет в таблице SQL")
+
+    wine_slug = result[0]
+    wine_url = f"https://vino-svoe.ru/wines/{wine_slug}"
+    
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     try:
+        response = requests.get(wine_url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            description_tag = soup.find('p', class_='wine-page__description')
+            description = description_tag.text.strip() if description_tag else "Нет описания"
+        else:
+            description = "Ошибка подключения к сайту"
+    except Exception:
+        description = "Не удалось загрузить информацию"
+        
+    return wine_url, wine_slug, description
+
+@app.post("/api/recognize")
+async def recognize_wine(data: ImageRequest):
+    print("\n[START] Начало обработки", flush=True)
+    
+    try:
+        # Декодирование (быстрая операция, оставляем тут)
         pure_base64 = data.image_base64.split(",")[-1]
         image_data = base64.b64decode(pure_base64)
-        image  =Image.open(io.BytesIO(image_data)).convert("RGB")
-        print(f"фотку успешно декодировал. Размер:{image.size}", flush=True)
-    except Exception as e:
-        error_msg = f"не удалось прочитать base64 строку:{str(e)}"
-        print(error_msg, flush=True)
-        raise HTTPException(status_code=400, detail=error_msg)
-
-    try:
-        input_width = 640
-        input_height = 640
-    
-        # 1. Загрузка ONNX сессии
-        
-    
-        # 2. Правильно получаем размеры PIL изображения (width, height)
+        image = Image.open(io.BytesIO(image_data)).convert("RGB")
         orig_w, orig_h = image.size
-    
-        # 3. Конвертируем PIL в NumPy array для OpenCV
-        img_np = np.array(image)
-    
-        # 4. Ресайз и подготовка тензора для YOLO
-        resized_image = cv2.resize(img_np, (input_width, input_height))
-        input_tensor = resized_image.astype(np.float32) / 255.0
-        input_tensor = np.transpose(input_tensor, (2, 0, 1))
-        input_tensor = np.expand_dims(input_tensor, axis=0)
-    
-        # 5. Запуск модели
-        outputs = session.run(None, {input_name: input_tensor})
-        prediction = outputs[0]  
-    
-        print("Инференс выполнен успешно. Формат вывода:", prediction.shape)
-    
-        # 6. Приводим матрицу к виду (8400, N)
-        pred = prediction[0] 
-        if pred.shape[0] < pred.shape[1]:
-            pred = pred.T
-    
-        # 7. Извлекаем лучшие предсказания (вынесено из-под if!)
-        scores = np.max(pred[:, 4:], axis=1)
-        best_idx = np.argmax(scores)
+        print(f"Фотку успешно декодировал. Размер: {image.size}", flush=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Не удалось прочитать base64 строку: {str(e)}")
+
+    try:
+        # ЗАПУСК ТЯЖЕЛОГО ML В ОТДЕЛЬНОМ ПОТОКЕ (Event Loop не блокируется!)
+        wine_id, distance = await asyncio.to_thread(
+            run_ml_pipeline, image, orig_w, orig_h, 640, 640
+        )
+        print(f"Faiss выдал ID: {wine_id} Метрика: {distance:.4f}", flush=True)
         
-        # Порог уверенности (например, > 25%)
-        if scores[best_idx] > 0.25:
-            box = pred[best_idx, :4]
-            xc, yc, w, h = box
-    
-            # 8. Пересчет координат из 640x640 в оригинальный размер картинки
-            scale_x = orig_w / input_width
-            scale_y = orig_h / input_height
-    
-            xc = xc * scale_x
-            yc = yc * scale_y
-            w = w * scale_x
-            h = h * scale_y
-    
-            x_min = int(xc - w / 2)
-            y_min = int(yc - h / 2)
-            x_max = int(xc + w / 2)
-            y_max = int(yc + h / 2)
-    
-            # Ограничиваем рамки пределами изображения
-            x_min = max(0, x_min)
-            y_min = max(0, y_min)
-            x_max = min(orig_w, x_max)
-            y_max = min(orig_h, y_max)
-    
-            # 9. Кропаем оригинальный PIL Image
-            if x_max > x_min and y_max > y_min:
-                image = image.crop((x_min, y_min, x_max, y_max))
+        # ЗАПУСК СЕТИ И БД В ОТДЕЛЬНОМ ПОТОКЕ (Event Loop не блокируется!)
+        wine_url, wine_slug, description = await asyncio.to_thread(fetch_wine_data, wine_id)
+        print(f"Данные собраны. Slug: {wine_slug}", flush=True)
 
     except Exception as e:
-        error_msg = f"YOLO не смогла: {str(e)}"
-        print(error_msg, flush=True)
-        raise HTTPException(status_code=500, detail=error_msg)
-    ####################################################################################################################
-    try:
-        tensor = transform(image).unsqueeze(0).to(device)
-        with torch.no_grad():
-            embedding = model(tensor).flatten().cpu().numpy().astype('float32')
-        print(f"нейросеть сгенирировала вектор. Длина: {len(embedding)}", flush=True)
-    except Exception as e:
-        error_msg = f"Сбой при прогоне через EfficientNet: {str(e)}"
-        print(error_msg, flush=True)
-        raise HTTPException(status_code=500, detail=error_msg)
+        print(f"[ERROR] Сбой в пайплайне: {str(e)}", flush=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
-    try:
-        dist, indecs = index.search(np.array([embedding]), k=1)
-        wine_id = int(indecs[0][0])
-        distance=float(dist[0][0])
-        print(f"Faiss выдал индекс ближайшего соседа ID:{wine_id} Метрика:{distance:.4f}", flush = True)
-        if wine_id == -1:
-            raise Exception("FAISS не нашёл совпадений")
-    except Exception as e:
-        error_msg=f"Сбой поиска в векторной базе:{str(e)}"
-        print(error_msg, flush=True)
-        raise HTTPException(status_code=404, detail=error_msg)
-
-    try:
-        conn = get_db_connection()
-        cursor=conn.cursor()
-        cursor.execute("SELECT wine_slug FROM wines WHERE id =%s;", (wine_id,))
-        result = cursor.fetchone()
-        cursor.close()
-        conn.close()
-
-        if not result:
-            raise Exception(f"Индекс {wine_id} есть в faiss, но записи с таким id нет в таблице sql")
-
-        wine_slug = result[0]
-        wine_url=f"https://vino-svoe.ru/wines/{wine_slug}"
-        print(f" вино успешно извлечено slug'{wine_slug}'", flush =True)
-    except Exception as e:
-        error_msg = f"Ошибка при работе с SQL базой {str(e)}"
-        print(error_msg, flush=True)
-        raise HTTPException(status_code=500, detail=error_msg)
-
-    print(f"запрашиваются данные с сайта", flush=True)
-
-    headers = {'User-Agent':'Mozilla/5.0(Windows NT 10.0;Win64;x64) AppleWebKit/537.36'}
-    try:
-        response=requests.get(wine_url, headers=headers, timeout=5)
-        if response.status_code==200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            description_tag=soup.find('p', class_='wine-page__description')
-            description = description_tag.text.strip() if description_tag else "Нет описания"
-            print(f"Данные успешно получены. Описание:{description}", flush=True)
-        else:
-            print(f"Сайт вернул код {response.status_code}", flush=True)
-            description="Ошибка подключения к сайту"
-    except Exception as e:
-        print(f"Не удалось распарсить страницу:{e}", flush=True)
-        description = "Не удалось загрузить информацию"
-    print("Запрос полностью обработан", flush = True)
-
-    return{
+    # Формируем итоговый словарь
+    payload = {
         "status": "success",
         "url": wine_url,
-        "parsed_data":{
+        "parsed_data": {
               "wine_name": wine_slug,
               "public_rating": 4.3,
               "guide_rating": 87.5,
               "short_info": description,
-              "gigachat_insights": "Насыщенный букет с нотами чёрной смородины и ванили, танины хорошо структурированы..."
+              "gigachat_insights": "Насыщенный букет с нотами чёрной смородины и ванили..."
         }
     }
+
+    # ФИКС ЧАНКОВ: Явно пакуем в JSON и считаем байты
+    json_str = json.dumps(payload, ensure_ascii=False)
+    json_bytes = json_str.encode("utf-8")
+    
+    print("[END] Запрос успешно обработан, отправляем ответ.", flush=True)
+
+    # Возвращаем жестко зафиксированный ответ
+    return Response(
+        content=json_bytes,
+        media_type="application/json",
+        headers={"Content-Length": str(len(json_bytes))}
+    )
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
