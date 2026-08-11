@@ -139,17 +139,35 @@ def get_db_connection():
     )
 print("Ожидание запросов\n", flush=True)
 # обработка запросов
+def letterbox_preprocess(img_bgr, input_size):
+    """
+    Точная копия preprocess() из offline-скрипта подготовки датасета —
+    letterbox-ресайз с сохранением пропорций вместо растяжения.
+    img_bgr: numpy-массив в формате BGR (как отдаёт cv2).
+    """
+    h, w = img_bgr.shape[:2]
+    scale = min(input_size[0] / h, input_size[1] / w)
+    nh, nw = int(h * scale), int(w * scale)
+    resized = cv2.resize(img_bgr, (nw, nh), interpolation=cv2.INTER_LINEAR)
 
+    dh = (input_size[0] - nh) / 2
+    dw = (input_size[1] - nw) / 2
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+
+    padded = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
+
+    blob = padded.astype(np.float32) / 255.0
+    blob = blob.transpose(2, 0, 1)[None, :]
+    return blob, scale, (dw, dh)
 # выносим тяжелую математику в отдельную синхронную функцию
 def run_ml_pipeline(image, orig_w, orig_h, input_width, input_height):
     # 3. Конвертируем PIL в NumPy array для OpenCV
-    img_np = np.array(image)
     
     # 4. Ресайз и подготовка тензора для YOLO
-    resized_image = cv2.resize(img_np, (input_width, input_height))
-    input_tensor = resized_image.astype(np.float32) / 255.0
-    input_tensor = np.transpose(input_tensor, (2, 0, 1))
-    input_tensor = np.expand_dims(input_tensor, axis=0)
+    img_np = np.array(image)
+    img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)  # PIL даёт RGB, cv2/модель ждёт BGR — как в offline-скрипте
+    input_tensor, scale, pad = letterbox_preprocess(img_bgr, (input_width, input_height))
     
     # 5. Запуск модели
     outputs = session.run(None, {input_name: input_tensor})
@@ -165,22 +183,38 @@ def run_ml_pipeline(image, orig_w, orig_h, input_width, input_height):
     best_idx = np.argmax(scores)
     
     # Порог уверенности
-    if scores[best_idx] > 0.03:
+    if scores[best_idx] > 0.25:
         box = pred[best_idx, :4]
-        xc, yc, w, h = box
-        
-        # 8. Пересчет координат
-        scale_x = orig_w / input_width
-        scale_y = orig_h / input_height
-        xc = xc * scale_x
-        yc = yc * scale_y
-        w = w * scale_x
-        h = h * scale_y
-        
-        x_min = max(0, int(xc - w / 2))
-        y_min = max(0, int(yc - h / 2))
-        x_max = min(orig_w, int(xc + w / 2))
-        y_max = min(orig_h, int(yc + h / 2))
+        xc_norm, yc_norm, w_norm, h_norm = box  # нормализованные 0.0-1.0
+    
+        # нормализованные -> пиксели пространства входа модели (640x640)
+        xc_model = xc_norm * input_width
+        yc_model = yc_norm * input_height
+        w_model = w_norm * input_width
+        h_model = h_norm * input_height
+    
+        x1_model = xc_model - w_model / 2
+        y1_model = yc_model - h_model / 2
+        x2_model = xc_model + w_model / 2
+        y2_model = yc_model + h_model / 2
+    
+        # убираем letterbox-паддинг и масштабируем обратно к оригиналу
+        dw, dh = pad
+        x1_orig = (x1_model - dw) / scale
+        y1_orig = (y1_model - dh) / scale
+        x2_orig = (x2_model - dw) / scale
+        y2_orig = (y2_model - dh) / scale
+    
+        x_min = max(0, int(np.clip(x1_orig, 0, orig_w)))
+        y_min = max(0, int(np.clip(y1_orig, 0, orig_h)))
+        x_max = min(orig_w, int(np.clip(x2_orig, 0, orig_w)))
+        y_max = min(orig_h, int(np.clip(y2_orig, 0, orig_h)))
+
+    if x_max > x_min and y_max > y_min:
+        image = image.crop((x_min, y_min, x_max, y_max))
+
+    if x_max > x_min and y_max > y_min:
+        image = image.crop((x_min, y_min, x_max, y_max))
         
         # 9. Кропаем
         if x_max > x_min and y_max > y_min:
