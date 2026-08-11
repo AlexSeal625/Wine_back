@@ -48,7 +48,48 @@ transform = transforms.Compose([
     transforms.ToTensor(), #превращаем картинку в математический тензор
     transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]) #нормализуем цвета
 ])
+DEBUG_SAVE_CROPS = True  # выключить перед боевым использованием
+DEBUG_CROPS_DIR = "debug_crops"
+DEBUG_LOG_CHUNK_SIZE = 4000  # некоторые лог-вьюеры (в т.ч. Render) режут очень длинные строки
 
+def save_crop_for_debugging(image: Image.Image, label: str = "crop") -> None:
+    """
+    Отладочное сохранение кропа этикетки. Диск на Render free tier
+    эфемерный (пропадает при рестарте/редеплое) и шелл-доступа обычно нет —
+    поэтому основной, гарантированно работающий канал это base64 в stdout
+    (Render Dashboard -> Logs). Сохранение на диск — как бонус для
+    локального запуска.
+    """
+    if not DEBUG_SAVE_CROPS:
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    filename = f"{label}_{timestamp}.jpg"
+
+    # 1) Пытаемся сохранить на диск — сработает локально, на Render в лучшем
+    #    случае временно (до рестарта контейнера).
+    try:
+        os.makedirs(DEBUG_CROPS_DIR, exist_ok=True)
+        filepath = os.path.join(DEBUG_CROPS_DIR, filename)
+        image.save(filepath, format="JPEG", quality=90)
+        print(f"[DEBUG] Кроп сохранён на диск: {filepath}", flush=True)
+    except Exception as e:
+        print(f"[DEBUG] Не удалось сохранить кроп на диск: {e}", flush=True)
+
+    # 2) Base64 в консоль — единственный канал, который точно доступен
+    #    на Render free tier без шелл-доступа.
+    try:
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=90)
+        b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+        print(f"[DEBUG_CROP_BASE64_START] {filename} size={len(b64)}", flush=True)
+        for i in range(0, len(b64), DEBUG_LOG_CHUNK_SIZE):
+            print(b64[i:i + DEBUG_LOG_CHUNK_SIZE], flush=True)
+        print(f"[DEBUG_CROP_BASE64_END] {filename}", flush=True)
+    except Exception as e:
+        print(f"[DEBUG] Не удалось закодировать кроп в base64: {e}", flush=True)
+        
 INDEX_FILE_PATH = "wines_base.index"
 index = None
 
@@ -142,7 +183,7 @@ def run_ml_pipeline(image, orig_w, orig_h, input_width, input_height):
         # 9. Кропаем
         if x_max > x_min and y_max > y_min:
             image = image.crop((x_min, y_min, x_max, y_max))
-
+            save_crop_for_debugging(image, label="yolo_crop")
     # Извлечение фичей
     tensor = transform(image).unsqueeze(0).to(device)
     with torch.no_grad():
