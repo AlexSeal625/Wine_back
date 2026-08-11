@@ -183,32 +183,40 @@ def run_ml_pipeline(image, orig_w, orig_h, input_width, input_height):
     best_idx = np.argmax(scores)
     
     # Порог уверенности
+    x_min, y_min, x_max, y_max = 0, 0, orig_w, orig_h
+    box_detected = False
+
     if scores[best_idx] > 0.25:
         box = pred[best_idx, :4]
-        xc_norm, yc_norm, w_norm, h_norm = box  # нормализованные 0.0-1.0
-    
-        # нормализованные -> пиксели пространства входа модели (640x640)
+        xc_norm, yc_norm, w_norm, h_norm = box
+
         xc_model = xc_norm * input_width
         yc_model = yc_norm * input_height
         w_model = w_norm * input_width
         h_model = h_norm * input_height
-    
+
         x1_model = xc_model - w_model / 2
         y1_model = yc_model - h_model / 2
         x2_model = xc_model + w_model / 2
         y2_model = yc_model + h_model / 2
-    
-        # убираем letterbox-паддинг и масштабируем обратно к оригиналу
+
         dw, dh = pad
         x1_orig = (x1_model - dw) / scale
         y1_orig = (y1_model - dh) / scale
         x2_orig = (x2_model - dw) / scale
         y2_orig = (y2_model - dh) / scale
-    
+
         x_min = max(0, int(np.clip(x1_orig, 0, orig_w)))
         y_min = max(0, int(np.clip(y1_orig, 0, orig_h)))
         x_max = min(orig_w, int(np.clip(x2_orig, 0, orig_w)))
         y_max = min(orig_h, int(np.clip(y2_orig, 0, orig_h)))
+        box_detected = True
+
+    if box_detected and x_max > x_min and y_max > y_min:
+        image = image.crop((x_min, y_min, x_max, y_max))
+        print(f"[DEBUG] Кроп применён: ({x_min},{y_min})-({x_max},{y_max})", flush=True)
+    else:
+        print("[DEBUG] Детекция не сработала (низкая уверенность) — используется полное фото", flush=True)
 
     if x_max > x_min and y_max > y_min:
         image = image.crop((x_min, y_min, x_max, y_max))
