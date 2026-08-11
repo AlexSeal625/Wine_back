@@ -163,7 +163,7 @@ def run_ml_pipeline(image, orig_w, orig_h, input_width, input_height):
     best_idx = np.argmax(scores)
     
     # Порог уверенности
-    if scores[best_idx] > 0.25:
+    if scores[best_idx] > 0.03:
         box = pred[best_idx, :4]
         xc, yc, w, h = box
         
