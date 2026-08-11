@@ -184,6 +184,7 @@ def run_ml_pipeline(image, orig_w, orig_h, input_width, input_height):
         
         # 9. Кропаем
         if x_max > x_min and y_max > y_min:
+            save_crop_for_debugging(image, label="original")
             image = image.crop((x_min, y_min, x_max, y_max))
             save_crop_for_debugging(image, label="yolo_crop")
     # Извлечение фичей
