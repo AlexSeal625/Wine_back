@@ -266,12 +266,41 @@ def fetch_wine_data(wine_id):
             soup = BeautifulSoup(response.text, 'html.parser')
             description_tag = soup.find('p', class_='wine-page__description')
             description = description_tag.text.strip() if description_tag else "Нет описания"
+            wine_name_tag=soup.find('h1', class_='wine-main-title-block__title')
+            wine_name = wine_name_tag.text.strip() if wine_name_tag else "Нет названия"
+            factory_tag=soup.find('a', class_='wine-main-title-block__manufacturer')
+            factory=factory_tag.text.strip() if factory_tag else "Нет информации о заводе"
+            rate_tag=soup.find('span', class_='wine-main-title-block__rating-text')
+            rate=rate_tag.text.strip() if rate_tag else "Нет рейтинга"
+            atcc_tag = soup.find_all('p', class_='wine-detail-info__detail-value')
+            if atcc_tag:
+                atcc_list_clean = [item.text.strip() for item in atcc_tag]
+                atcc_list = list(dict.fromkeys(atcc_list_clean))
+            else:
+                atcc_list = ["Нет информации"]
+            num_tag = soup.find_all('p', class_='wine-hero-block__card-value')
+            if num_tag:
+                num_list_clean = [item.text.strip() for item in num_tag]
+                num_list = list(dict.fromkeys(num_list_clean))
+            else:
+                num_list = ["Нет информации"]
+            dishes_tag = soup.find_all('p', class_='wine-dish-item__name')
+            if dishes_tag:
+                dishes_list_clean = [item.text.strip() for item in dishes_tag]
+                dishes_list = list(dict.fromkeys(dishes_list_clean))
+            else:
+                dishes_list=["Нет блюд"]
+            print(f"Данные успешно получены.{wine_name}, Описание:{description}"
+                  f"{factory} {rate} {atcc_list}  {num_list} {dishes_list}", flush=True)
         else:
-            description = "Ошибка подключения к сайту"
+            print(f"Сайт вернул код {response.status_code}", flush=True)
+            description, wine_name, factory, rate, atcc_list, num_list, dishes_list=["Ошибка подключения к сайту"]*11
     except Exception:
-        description = "Не удалось загрузить информацию"
+        print(f"Не удалось распарсить страницу:{e}", flush=True)
+        traceback.print_exc()
+        description, wine_name, factory, rate, atcc_list, num_list, dishes_list=["Не удалось загрузить информацию"]*11
         
-    return wine_url, wine_slug, description
+    return wine_url, wine_slug, description, wine_name, factory, rate, atcc, num_list, dishes_list
 
 @app.post("/api/recognize")
 async def recognize_wine(data: ImageRequest):
@@ -307,11 +336,17 @@ async def recognize_wine(data: ImageRequest):
         "status": "success",
         "url": wine_url,
         "parsed_data": {
-              "wine_name": wine_slug,
-              "public_rating": 4.3,
-              "guide_rating": 87.5,
-              "short_info": description,
-              "gigachat_insights": "Насыщенный букет с нотами чёрной смородины и ванили..."
+              "name":wine_name,
+              "description":description,
+              "factory": factory,
+              "rate":rate,
+              "area":atcc_list[0],
+              "sort":atcc_list[1],
+              "type":atcc_list[2],
+              "color":atcc_list[3],
+              "temperature":num_list[0],
+              "alcohol":num_list[1],
+              "dishes":dishes_list
         }
     }
 
