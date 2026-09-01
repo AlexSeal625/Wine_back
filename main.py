@@ -294,17 +294,29 @@ def find_by_slug(wine_slug):
                 dishes_list = list(dict.fromkeys(dishes_list_clean))
             else:
                 dishes_list = ["Нет блюд"]
+            wine_image="Нет картинки"
+            image_tag=soup.find('img', class_='wine-hero-block__info')
+            if image_tag and image_tag.get('src'):
+                image_src = image_tag['src']
+                image_url = f"https://api.vino-svoe{image_src}" if image_src.startswitch('/') else image_src
+                try:
+                    image_result = requests.get(image_url, headers=headers, timeout=5)
+                    if image_result.status_code==200:
+                        b64_encoded = base64.b64encode(image_result.content).decode('utf-8')
+                        wine_image=f"data:image/jpeg;base64,{b64_encoded}"
+                except Exception as e:
+                    print(f"Не удалось скачать картинку товара: {e}", flush=True)
             print(f"Данные успешно получены.{wine_name}, Описание:{description}"
                   f"{factory} {rate} {atcc_list}  {num_list} {dishes_list}", flush=True)
         else:
             print(f"Сайт вернул код {response.status_code}", flush=True)
-            description, wine_name, factory, rate, atcc_list, num_list, dishes_list = [ "Ошибка подключения к сайту"] * 7
+            description, wine_name, factory, rate, atcc_list, num_list, dishes_list, wine_image = [ "Ошибка подключения к сайту"] * 8
     except Exception as e:
         print(f"Не удалось распарсить страницу:{e}", flush=True)
         traceback.print_exc()
-        description, wine_name, factory, rate, atcc_list, num_list, dishes_list = [ "Не удалось загрузить информацию"] * 7
+        description, wine_name, factory, rate, atcc_list, num_list, dishes_list, wine_image = [ "Не удалось загрузить информацию"] * 8
 
-    return wine_url,wine_slug, description, wine_name, factory, rate, atcc_list, num_list, dishes_list
+    return wine_url,wine_slug, description, wine_name, factory, rate, atcc_list, num_list, dishes_list,wine_image
 
 
 # выносим сеть и БД в отдельную синхронную функцию
@@ -318,11 +330,44 @@ def fetch_wine_data(wine_id):
 
     if not result:
         raise Exception(f"Индекс {wine_id} есть в faiss, но записи с таким id нет в таблице SQL")
-
     wine_slug = result[0]
-    wine_url, wine_slug, description, wine_name, factory, rate, atcc_list, num_list, dishes_list = find_by_slug(wine_slug)
-    return wine_url, wine_slug, description, wine_name, factory, rate, atcc_list, num_list, dishes_list
+    wine_url, wine_slug, description, wine_name, factory, rate, atcc_list, num_list, dishes_list, wine_image = find_by_slug(wine_slug)
+    return wine_url, wine_slug, description, wine_name, factory, rate, atcc_list, num_list, dishes_list, wine_image
 
+def parsed_info(wine_url, wine_slug, description, wine_name, factory, rate, atcc_list, num_list, dishes_list, wine_image):
+    payload = {
+        "status": "success",
+        "url": wine_url,
+        "parsed_data": {
+            "name": wine_name,
+            "description": description,
+            "factory": factory,
+            "rate": rate,
+            "area": atcc_list[0],
+            "sort": atcc_list[1],
+            "type": atcc_list[2],
+            "color": atcc_list[3],
+            "temperature": num_list[0],
+            "alcohol": num_list[1],
+            "dishes": dishes_list,
+            "wine_image": wine_image
+        }
+    }
+
+    # ФИКС ЧАНКОВ: Явно пакуем в JSON и считаем байты
+    json_str = json.dumps(payload, ensure_ascii=False)
+    json_bytes = json_str.encode("utf-8")
+
+    print("[END] Запрос успешно обработан, отправляем ответ.", flush=True)
+
+    # Возвращаем жестко зафиксированный ответ
+    return Response(
+        content=json_bytes,
+        media_type="application/json",
+        headers={"Content-Length": str(len(json_bytes)),
+                 "Cache-Control": "no-transform"
+                 }
+    )
 
 @app.post("/api/recognize")
 async def recognize_wine(data: ImageRequest):
@@ -346,85 +391,25 @@ async def recognize_wine(data: ImageRequest):
         print(f"Faiss выдал ID: {wine_id} Метрика: {distance:.4f}", flush=True)
 
         # ЗАПУСК СЕТИ И БД В ОТДЕЛЬНОМ ПОТОКЕ (Event Loop не блокируется!)
-        wine_url, wine_slug, description, wine_name, factory, rate, atcc_list, num_list, dishes_list = await asyncio.to_thread(fetch_wine_data, wine_id)
+        wine_url, wine_slug, description, wine_name, factory, rate, atcc_list, num_list, dishes_list, wine_image = await asyncio.to_thread(fetch_wine_data, wine_id)
         print(f"Данные собраны. Slug: {wine_slug}", flush=True)
 
     except Exception as e:
         print(f"[ERROR] Сбой в пайплайне: {str(e)}", flush=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-    # Формируем итоговый словарь
-    payload = {
-        "status": "success",
-        "url": wine_url,
-        "parsed_data": {
-            "name": wine_name,
-            "description": description,
-            "factory": factory,
-            "rate": rate,
-            "area": atcc_list[0],
-            "sort": atcc_list[1],
-            "type": atcc_list[2],
-            "color": atcc_list[3],
-            "temperature": num_list[0],
-            "alcohol": num_list[1],
-            "dishes": dishes_list
-        }
-    }
-
-    # ФИКС ЧАНКОВ: Явно пакуем в JSON и считаем байты
-    json_str = json.dumps(payload, ensure_ascii=False)
-    json_bytes = json_str.encode("utf-8")
-
-    print("[END] Запрос успешно обработан, отправляем ответ.", flush=True)
-
-    # Возвращаем жестко зафиксированный ответ
-    return Response(
-        content=json_bytes,
-        media_type="application/json",
-        headers={"Content-Length": str(len(json_bytes)),
-                 "Cache-Control": "no-transform"
-                 }
-    )
+    return parsed_info(wine_url, wine_slug, description, wine_name, factory, rate, atcc_list, num_list, dishes_list, wine_image)
+    
 @app.post("/api/memory")
 async def memory_wine(data: WineSlug):
     try:
-        wine_url, wine_slug, description, wine_name, factory, rate, atcc_list, num_list, dishes_list = await asyncio.to_thread(find_by_slug, data.memory_slug )
+        wine_url, wine_slug, description, wine_name, factory, rate, atcc_list, num_list, dishes_list, wine_image = await asyncio.to_thread(find_by_slug, data.memory_slug )
         print(f"Данные собраны. Slug: {wine_slug}", flush=True)
     except Exception as e:
         print(f"[ERROR] Сбой в пайплайне: {str(e)}", flush=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-    payload = {
-        "status": "success",
-        "url": wine_url,
-        "parsed_data": {
-            "name": wine_name,
-            "description": description,
-            "factory": factory,
-            "rate": rate,
-            "area": atcc_list[0],
-            "sort": atcc_list[1],
-            "type": atcc_list[2],
-            "color": atcc_list[3],
-            "temperature": num_list[0],
-            "alcohol": num_list[1],
-            "dishes": dishes_list
-        }
-    }
-    json_str = json.dumps(payload, ensure_ascii=False)
-    json_bytes = json_str.encode("utf-8")
-
-    print("[END] Запрос успешно обработан, отправляем ответ.", flush=True)
-
-    # Возвращаем жестко зафиксированный ответ
-    return Response(
-        content=json_bytes,
-        media_type="application/json",
-        headers={"Content-Length": str(len(json_bytes)),
-                 "Cache-Control": "no-transform"
-                 }
-    )
+    return parsed_info(wine_url, wine_slug, description, wine_name, factory, rate, atcc_list, num_list, dishes_list,wine_image)
 if __name__ == "__main__":
     import uvicorn
 
