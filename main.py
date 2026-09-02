@@ -350,7 +350,7 @@ def parsed_info(wine_url, wine_slug, description, wine_name, factory, rate, atcc
             "temperature": num_list[0],
             "alcohol": num_list[1],
             "dishes": dishes_list,
-            "wine_image": wine_image
+           # "wine_image": wine_image
         }
     }
 
