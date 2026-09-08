@@ -295,10 +295,10 @@ def find_by_slug(wine_slug):
             else:
                 dishes_list = ["Нет блюд"]
             wine_image="Нет картинки"
-            image_tag=soup.find('img', class_='wine-hero-block__info')
+            image_tag=soup.find('img', class_='wine-hero-block__bottle')
             if image_tag and image_tag.get('src'):
                 image_src = image_tag['src']
-                image_url = f"https://api.vino-svoe{image_src}" if image_src.startswitch('/') else image_src
+                image_url = f"https://api.vino-svoe{image_src}" if image_src.startswith('/') else image_src
                 try:
                     image_result = requests.get(image_url, headers=headers, timeout=5)
                     if image_result.status_code==200:
