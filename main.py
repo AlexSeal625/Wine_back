@@ -142,10 +142,10 @@ class WineSlug(BaseModel):
 
 def get_db_connection():
     return psycopg2.connect(
-        host="dpg-d9q8f6rm8hqs73e6hbp0-a",
-        database="wine_db_p4pv",
+        host="dpg-dagfdfh42hec73c328bg-a",
+        database="wine_db_p4pv_0tft",
         user="wine_user",
-        password="rSnOHgBrVlYBsTJGz4A0qAJWQ9Bd56xi"
+        password="Zc6c48L0eDF7hFt9HhHvzTpsYudLsnsl"
     )
 
 
