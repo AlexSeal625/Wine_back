@@ -56,6 +56,27 @@ YOLO_INPUT_WIDTH = 640
 YOLO_INPUT_HEIGHT = 640
 YOLO_CONFIDENCE_THRESHOLD = 0.25
 
+# --------------------------------------------------------------
+# Пороги отсева "это не бутылка вина" (по cosine similarity к
+# ближайшему вектору в FAISS-базе).
+#
+# Логика: DINOv2-эмбеддинг случайной картинки (кот, стол, человек,
+# другой напиток и т.д.) в среднем даёт низкую max-similarity к
+# базе вин. Если YOLO не смог найти этикетку и в DINOv2 идёт всё
+# фото целиком — эмбеддинг менее показательный, поэтому порог для
+# этого случая строже.
+#
+# СТАРТОВЫЕ значения, их обязательно нужно откалибровать на своих
+# реальных фото (позитивы: фото бутылок вина; негативы: что угодно
+# другое) — см. комментарий ниже в is_wine_photo().
+# --------------------------------------------------------------
+SIMILARITY_THRESHOLD_WITH_BOX = float(
+    os.getenv("SIMILARITY_THRESHOLD_WITH_BOX", "0.45")
+)
+SIMILARITY_THRESHOLD_NO_BOX = float(
+    os.getenv("SIMILARITY_THRESHOLD_NO_BOX", "0.55")
+)
+
 # Сайт
 SITE_BASE_URL = "https://vino-svoe.ru"
 IMAGE_BASE_URL = "https://api.vino-svoe.ru"
@@ -322,6 +343,53 @@ def get_dinov2_embedding(image: Image.Image) -> np.ndarray:
 
 
 # ============================================================
+# ФИЛЬТР "ЭТО ВООБЩЕ ПОХОЖЕ НА ВИНО?"
+# ============================================================
+
+def is_wine_photo(similarity: float, box_detected: bool) -> bool:
+    """
+    Отсекает фото, которые непохожи ни на одно вино в базе.
+
+    Идея: cosine similarity к ближайшему соседу в FAISS — это по сути
+    "уверенность" системы. Для настоящих фото бутылок вина (даже
+    незнакомых конкретных вин) similarity к чему-то в базе обычно
+    заметно выше, чем для случайных посторонних фото (люди, еда,
+    интерьер, другие товары и т.п.), потому что DINOv2-эмбеддинги
+    визуально похожих объектов (форма бутылки, этикетка, стекло)
+    группируются ближе друг к другу в пространстве эмбеддингов.
+
+    Порог разный для двух случаев:
+      - box_detected=True  -> YOLO нашёл область этикетки, эмбеддинг
+        считается по кропу -> сигнал чище -> порог мягче.
+      - box_detected=False -> использовалось всё фото целиком (могло
+        быть что угодно в кадре) -> сигнал шумнее -> порог строже.
+
+    КАЛИБРОВКА (обязательно сделать перед продом):
+      1. Собрать ~150-300 позитивных фото (реальные бутылки вина,
+         разные ракурсы/освещение/размытие) и ~150-300 негативных
+         (люди, еда, интерьер, другие напитки, случайные объекты).
+      2. Прогнать через run_ml_pipeline, залогировать similarity
+         и box_detected для каждого.
+      3. Построить ROC/PR-кривую отдельно для box_detected=True и
+         box_detected=False, выбрать пороги, дающие нужный баланс
+         precision/recall (для 90%+ точности отсева обычно нужно
+         сознательно жертвовать частью recall на "плохих" фото
+         реальных бутылок — т.е. иногда просить переснять).
+      4. Подставить подобранные значения в переменные
+         SIMILARITY_THRESHOLD_WITH_BOX / SIMILARITY_THRESHOLD_NO_BOX
+         (или через env-переменные на Render).
+    """
+
+    threshold = (
+        SIMILARITY_THRESHOLD_WITH_BOX
+        if box_detected
+        else SIMILARITY_THRESHOLD_NO_BOX
+    )
+
+    return similarity >= threshold
+
+
+# ============================================================
 # ML PIPELINE
 # ============================================================
 
@@ -432,7 +500,7 @@ def run_ml_pipeline(image, orig_w, orig_h, input_width, input_height):
     if wine_id == -1:
         raise Exception("FAISS не нашёл совпадений")
 
-    return wine_id, similarity
+    return wine_id, similarity, box_detected
 
 
 # ============================================================
@@ -645,7 +713,7 @@ async def recognize_wine(data: ImageRequest):
     try:
         print("[ML] Запуск YOLO + DINOv2-reg + FAISS", flush=True)
 
-        wine_id, similarity = await asyncio.to_thread(
+        wine_id, similarity, box_detected = await asyncio.to_thread(
             run_ml_pipeline,
             image, orig_w, orig_h, YOLO_INPUT_WIDTH, YOLO_INPUT_HEIGHT
         )
@@ -653,10 +721,31 @@ async def recognize_wine(data: ImageRequest):
         print(f"[FAISS] Выдал ID: {wine_id}", flush=True)
         print(f"[FAISS] Cosine similarity: {similarity:.4f}", flush=True)
 
+        # ---- ФИЛЬТР: похоже ли вообще на бутылку вина? ----
+        if not is_wine_photo(similarity, box_detected):
+            print(
+                f"[FILTER] Фото отклонено как не-вино: "
+                f"similarity={similarity:.4f}, box_detected={box_detected}",
+                flush=True
+            )
+            # ВАЖНО: подгоните под то, что уже ждёт фронтенд как "не нашлось".
+            # Если у фронта уже есть обработка 404 -> достаточно так.
+            # Если фронт ждёт именно JSON-структуру как в parsed_info() со
+            # status != "success" -- поменяйте на такой Response вместо
+            # HTTPException.
+            raise HTTPException(
+                status_code=404,
+                detail="Вино на фото не распознано"
+            )
+
         result = await asyncio.to_thread(fetch_wine_data, wine_id)
 
         print(f"[MAPPING] Данные собраны. Slug: {result[1]}", flush=True)
 
+    except HTTPException:
+        # пробрасываем как есть (в т.ч. 404 из фильтра выше),
+        # чтобы не превратилось в 500 в блоке ниже
+        raise
     except Exception as e:
         print(f"[ERROR] Сбой в пайплайне: {str(e)}", flush=True)
         traceback.print_exc()
