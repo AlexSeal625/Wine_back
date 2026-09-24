@@ -8,3 +8,4 @@ pydantic
 async-timeout
 opencv-python-headless
 onnxruntime>=1.18.0
+transformers
