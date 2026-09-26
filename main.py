@@ -6,10 +6,9 @@ import json
 import asyncio
 import traceback
 import re
-import xml.etree.ElementTree as ET
+import time
 
 from concurrent.futures import ThreadPoolExecutor
-from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlparse
 
 from contextlib import asynccontextmanager
@@ -244,6 +243,7 @@ async def lifespan(app: FastAPI):
         "r",
         encoding="utf-8"
     ) as f:
+
         raw_mapping = json.load(f)
 
     id_to_slug = {
@@ -331,40 +331,33 @@ class FeedResponse(BaseModel):
 
 
 # ============================================================
-# FEED CACHE
+# FEED CACHE / SETTINGS
 # ============================================================
 
 # 6 часов
 FEED_CACHE_TTL = 6 * 60 * 60
 
-# Количество элементов в выдаче
+# Количество элементов
 FEED_NEWS_LIMIT = 20
 FEED_WINE_LIMIT = 30
 
 # Таймауты внешних запросов
-FEED_NEWS_TIMEOUT = 8
+FEED_CATEGORY_TIMEOUT = 8
+FEED_ARTICLE_TIMEOUT = 8
 FEED_WINE_TIMEOUT = 5
 
-# Источники новостей.
-#
-# Они используются только во время обновления кэша.
-# Сам /feed при валидном кэше внешние сайты НЕ запрашивает.
-FEED_NEWS_SOURCES = (
-    "https://www.decanter.com/feed/",
-    "https://www.wineenthusiast.com/feed/",
-    "https://www.thedrinksbusiness.com/feed/",
+# Главная страница раздела статей
+FEED_ARTICLES_CATEGORY_URL = (
+    f"{SITE_BASE_URL}/category/articles"
 )
 
-# Уже сериализованный JSON.
-# Благодаря этому при обычном запросе /feed не происходит
-# повторной сборки Pydantic-моделей и json.
+# Уже сериализованный JSON
 _feed_cache_bytes = None
 
-# Момент последнего успешного обновления cache.
+# Время последнего успешного обновления
 _feed_cache_timestamp = 0.0
 
-# Защита от ситуации, когда одновременно приходит много
-# запросов после истечения TTL.
+# Защита от параллельного обновления
 _feed_cache_lock = asyncio.Lock()
 
 
@@ -374,18 +367,15 @@ _feed_cache_lock = asyncio.Lock()
 
 def clean_feed_wine_slug(slug: str) -> str:
     """
-    Убирает технические хвосты из slug:
+    Убирает технические хвосты:
 
         vino_failed
         vino_faile
         vino_fail
-
-    а также повторения:
-
         vino_failed_failed
         vino_faile_failed
 
-    При этом обычная часть slug не изменяется.
+    Обычный slug не изменяется.
     """
 
     value = str(slug).strip()
@@ -405,201 +395,362 @@ def clean_feed_wine_slug(slug: str) -> str:
 
 
 # ============================================================
-# FEED: XML HELPERS
+# FEED: URL HELPERS
 # ============================================================
 
-def _xml_local_name(tag: str) -> str:
-    """
-    Убирает namespace из XML-тега.
-
-    Например:
-
-        {http://purl.org/rss/1.0/}item
-
-    превращается в:
-
-        item
-    """
-
-    return tag.rsplit("}", 1)[-1].lower()
-
-
-def _xml_child_text(element, names) -> str:
-
-    names = set(names)
-
-    for child in element.iter():
-
-        if child is element:
-            continue
-
-        if _xml_local_name(child.tag) in names:
-
-            text = "".join(
-                child.itertext()
-            ).strip()
-
-            if text:
-                return text
-
-    return ""
-
-
-def _xml_link(element, feed_url: str) -> str:
-
-    for child in element.iter():
-
-        if child is element:
-            continue
-
-        if _xml_local_name(child.tag) != "link":
-            continue
-
-        href = (
-            child.attrib.get("href")
-            or ""
-        ).strip()
-
-        if href:
-
-            rel = child.attrib.get("rel")
-
-            if rel in (
-                None,
-                "",
-                "alternate"
-            ):
-                return urljoin(
-                    feed_url,
-                    href
-                )
-
-        text = "".join(
-            child.itertext()
-        ).strip()
-
-        if text:
-            return urljoin(
-                feed_url,
-                text
-            )
-
-    return ""
-
-
-def _xml_image_url(
-    element,
-    description: str,
-    feed_url: str
-) -> str:
-
-    for child in element.iter():
-
-        if child is element:
-            continue
-
-        local_name = _xml_local_name(
-            child.tag
-        )
-
-        # Media RSS
-        if local_name in {
-            "content",
-            "thumbnail"
-        }:
-
-            url = (
-                child.attrib.get("url")
-                or ""
-            ).strip()
-
-            if url:
-                return urljoin(
-                    feed_url,
-                    url
-                )
-
-        # RSS enclosure
-        if local_name == "enclosure":
-
-            url = (
-                child.attrib.get("url")
-                or ""
-            ).strip()
-
-            mime = (
-                child.attrib.get("type")
-                or ""
-            ).lower()
-
-            if url and (
-                mime.startswith("image/")
-                or not mime
-            ):
-                return urljoin(
-                    feed_url,
-                    url
-                )
-
-    # Последний fallback:
-    # ищем img внутри description/content.
-    if description:
-
-        soup = BeautifulSoup(
-            description,
-            "html.parser"
-        )
-
-        image_tag = soup.find("img")
-
-        if image_tag and image_tag.get("src"):
-
-            return urljoin(
-                feed_url,
-                image_tag["src"]
-            )
-
-    return ""
-
-
-# ============================================================
-# FEED: DATE
-# ============================================================
-
-def _parse_feed_datetime(
+def _absolute_site_url(
     value: str
 ) -> str:
 
     if not value:
         return ""
 
-    # RFC 822 / RSS
+    value = value.strip()
+
+    if value.startswith("//"):
+        return f"https:{value}"
+
+    return urljoin(
+        SITE_BASE_URL,
+        value
+    )
+
+
+def _is_article_url(
+    url: str
+) -> bool:
+
     try:
 
-        dt = parsedate_to_datetime(
-            value
-        )
+        parsed = urlparse(url)
 
-        if dt.tzinfo is None:
-            dt = dt.replace(
-                tzinfo=timezone.utc
-            )
+        base_host = urlparse(
+            SITE_BASE_URL
+        ).netloc
+
+        if (
+            parsed.netloc
+            and parsed.netloc != base_host
+        ):
+            return False
+
+        path = parsed.path.rstrip("/")
 
         return (
-            dt.astimezone(timezone.utc)
-            .isoformat()
-            .replace("+00:00", "Z")
+            path.startswith("/articles/")
+            and len(path) > len("/articles/")
         )
 
     except Exception:
-        pass
 
-    # ISO 8601 / Atom
+        return False
+
+
+# ============================================================
+# FEED: TEXT HELPERS
+# ============================================================
+
+def _clean_feed_text(
+    value: str
+) -> str:
+
+    if not value:
+        return ""
+
+    text = BeautifulSoup(
+        value,
+        "html.parser"
+    ).get_text(
+        " ",
+        strip=True
+    )
+
+    return re.sub(
+        r"\s+",
+        " ",
+        text
+    ).strip()
+
+
+def _short_feed_description(
+    value: str,
+    limit: int = 280
+) -> str:
+
+    text = _clean_feed_text(
+        value
+    )
+
+    if not text:
+        return ""
+
+    if len(text) <= limit:
+        return text
+
+    shortened = (
+        text[:limit]
+        .rsplit(" ", 1)[0]
+        .rstrip(".,;:!?-")
+    )
+
+    return shortened + "..."
+
+
+# ============================================================
+# FEED: DISCOVER CATEGORIES
+# ============================================================
+
+def _discover_feed_categories():
+
+    """
+    Заходит на:
+
+        /category/articles
+
+    и автоматически ищет ссылки
+    на подразделы этого раздела.
+    """
+
+    response = requests.get(
+        FEED_ARTICLES_CATEGORY_URL,
+        headers=FEED_HEADERS,
+        timeout=FEED_CATEGORY_TIMEOUT
+    )
+
+    response.raise_for_status()
+
+    soup = BeautifulSoup(
+        response.text,
+        "html.parser"
+    )
+
+    categories = {}
+
+    base_host = urlparse(
+        SITE_BASE_URL
+    ).netloc
+
+    for link in soup.find_all(
+        "a",
+        href=True
+    ):
+
+        href = link.get(
+            "href",
+            ""
+        ).strip()
+
+        if not href:
+            continue
+
+        absolute_url = _absolute_site_url(
+            href
+        )
+
+        try:
+
+            parsed = urlparse(
+                absolute_url
+            )
+
+        except Exception:
+
+            continue
+
+        if (
+            parsed.netloc
+            and parsed.netloc != base_host
+        ):
+            continue
+
+        path = parsed.path.rstrip("/")
+
+        if not path.startswith(
+            "/category/articles/"
+        ):
+            continue
+
+        if path == "/category/articles":
+            continue
+
+        name = _clean_feed_text(
+            link.get_text(
+                " ",
+                strip=True
+            )
+        )
+
+        if not name:
+            continue
+
+        categories[
+            absolute_url
+        ] = name
+
+    result = [
+        {
+            "url": url,
+            "name": name
+        }
+        for url, name in categories.items()
+    ]
+
+    print(
+        f"[FEED][CATEGORIES] "
+        f"Найдено подразделов: {len(result)}",
+        flush=True
+    )
+
+    for category in result:
+
+        print(
+            f"[FEED][CATEGORIES] "
+            f"{category['name']} -> "
+            f"{category['url']}",
+            flush=True
+        )
+
+    return result
+
+
+# ============================================================
+# FEED: FIND ARTICLE LINKS
+# ============================================================
+
+def _extract_article_links(
+    soup: BeautifulSoup
+):
+
+    links = []
+    seen = set()
+
+    for link in soup.find_all(
+        "a",
+        href=True
+    ):
+
+        href = link.get(
+            "href",
+            ""
+        ).strip()
+
+        absolute_url = _absolute_site_url(
+            href
+        )
+
+        if not _is_article_url(
+            absolute_url
+        ):
+            continue
+
+        parsed = urlparse(
+            absolute_url
+        )
+
+        clean_url = (
+            f"{parsed.scheme}://"
+            f"{parsed.netloc}"
+            f"{parsed.path}"
+        )
+
+        if clean_url in seen:
+            continue
+
+        seen.add(
+            clean_url
+        )
+
+        links.append(
+            clean_url
+        )
+
+    return links
+
+
+# ============================================================
+# FEED: CATEGORY ARTICLES
+# ============================================================
+
+def _fetch_category_articles(
+    category_url: str,
+    category_name: str
+):
+
+    response = requests.get(
+        category_url,
+        headers=FEED_HEADERS,
+        timeout=FEED_CATEGORY_TIMEOUT
+    )
+
+    response.raise_for_status()
+
+    soup = BeautifulSoup(
+        response.text,
+        "html.parser"
+    )
+
+    article_urls = _extract_article_links(
+        soup
+    )
+
+    result = []
+
+    for article_url in article_urls:
+
+        result.append({
+            "url": article_url,
+            "category": category_name
+        })
+
+    print(
+        f"[FEED][CATEGORY] "
+        f"{category_name}: "
+        f"{len(result)} статей",
+        flush=True
+    )
+
+    return result
+
+
+# ============================================================
+# FEED: DATE
+# ============================================================
+
+RUSSIAN_MONTHS = {
+    "января": 1,
+    "февраля": 2,
+    "марта": 3,
+    "апреля": 4,
+    "мая": 5,
+    "июня": 6,
+    "июля": 7,
+    "августа": 8,
+    "сентября": 9,
+    "октября": 10,
+    "ноября": 11,
+    "декабря": 12,
+}
+
+
+def _parse_article_date(
+    value: str
+) -> str:
+
+    if not value:
+        return ""
+
+    value = _clean_feed_text(
+        value
+    )
+
+    # --------------------------------------------------------
+    # ISO
+    # --------------------------------------------------------
+
     try:
 
         normalized = (
             value
-            .strip()
             .replace(
                 "Z",
                 "+00:00"
@@ -616,182 +767,494 @@ def _parse_feed_datetime(
             )
 
         return (
-            dt.astimezone(timezone.utc)
+            dt.astimezone(
+                timezone.utc
+            )
             .isoformat()
-            .replace("+00:00", "Z")
+            .replace(
+                "+00:00",
+                "Z"
+            )
         )
 
     except Exception:
-        return ""
+        pass
+
+    # --------------------------------------------------------
+    # Русская дата
+    # --------------------------------------------------------
+
+    match = re.search(
+        r"(\d{1,2})\s+"
+        r"(января|февраля|марта|апреля|мая|июня|"
+        r"июля|августа|сентября|октября|ноября|декабря)"
+        r"(?:\s+(\d{4}))?",
+        value.lower()
+    )
+
+    if match:
+
+        day = int(
+            match.group(1)
+        )
+
+        month = RUSSIAN_MONTHS[
+            match.group(2)
+        ]
+
+        year = (
+            int(match.group(3))
+            if match.group(3)
+            else datetime.now(
+                timezone.utc
+            ).year
+        )
+
+        try:
+
+            dt = datetime(
+                year,
+                month,
+                day,
+                tzinfo=timezone.utc
+            )
+
+            return (
+                dt.isoformat()
+                .replace(
+                    "+00:00",
+                    "Z"
+                )
+            )
+
+        except Exception:
+            pass
+
+    return ""
 
 
 # ============================================================
-# FEED: DESCRIPTION
+# FEED: ARTICLE IMAGE
 # ============================================================
 
-def _short_feed_description(
-    value: str,
-    limit: int = 280
+def _extract_article_image(
+    soup: BeautifulSoup
 ) -> str:
 
-    if not value:
-        return ""
+    # --------------------------------------------------------
+    # OpenGraph
+    # --------------------------------------------------------
 
-    text = BeautifulSoup(
-        value,
-        "html.parser"
-    ).get_text(
+    for property_name in (
+        "og:image",
+        "twitter:image"
+    ):
+
+        meta = soup.find(
+            "meta",
+            attrs={
+                "property": property_name
+            }
+        )
+
+        if not meta:
+
+            meta = soup.find(
+                "meta",
+                attrs={
+                    "name": property_name
+                }
+            )
+
+        if meta:
+
+            content = (
+                meta.get(
+                    "content",
+                    ""
+                ).strip()
+            )
+
+            if content:
+
+                return _absolute_site_url(
+                    content
+                )
+
+    # --------------------------------------------------------
+    # Основные классы изображения
+    # --------------------------------------------------------
+
+    preferred_classes = (
+        "article__image",
+        "article-image",
+        "article-page__image",
+        "article-page__img",
+        "news-card__image",
+        "article-card__image",
+    )
+
+    for class_name in preferred_classes:
+
+        image = soup.find(
+            "img",
+            class_=class_name
+        )
+
+        if image:
+
+            src = (
+                image.get("src")
+                or image.get("data-src")
+                or ""
+            ).strip()
+
+            if src:
+
+                return _absolute_site_url(
+                    src
+                )
+
+    # --------------------------------------------------------
+    # srcset
+    # --------------------------------------------------------
+
+    for image in soup.find_all(
+        "img"
+    ):
+
+        srcset = (
+            image.get(
+                "srcset",
+                ""
+            ).strip()
+        )
+
+        if srcset:
+
+            variants = []
+
+            for part in srcset.split(","):
+
+                part = part.strip()
+
+                if not part:
+                    continue
+
+                url = part.split()[0]
+
+                variants.append(
+                    url
+                )
+
+            if variants:
+
+                return _absolute_site_url(
+                    variants[-1]
+                )
+
+        src = (
+            image.get("src")
+            or image.get("data-src")
+            or ""
+        ).strip()
+
+        if src:
+
+            return _absolute_site_url(
+                src
+            )
+
+    return ""
+
+
+# ============================================================
+# FEED: ARTICLE DESCRIPTION
+# ============================================================
+
+def _extract_article_description(
+    soup: BeautifulSoup
+) -> str:
+
+    # meta description
+    meta = soup.find(
+        "meta",
+        attrs={
+            "name": "description"
+        }
+    )
+
+    if meta:
+
+        content = (
+            meta.get(
+                "content",
+                ""
+            ).strip()
+        )
+
+        if content:
+
+            return _short_feed_description(
+                content
+            )
+
+    # og description
+    meta = soup.find(
+        "meta",
+        attrs={
+            "property": "og:description"
+        }
+    )
+
+    if meta:
+
+        content = (
+            meta.get(
+                "content",
+                ""
+            ).strip()
+        )
+
+        if content:
+
+            return _short_feed_description(
+                content
+            )
+
+    # Первый нормальный абзац
+    h1 = soup.find("h1")
+
+    if h1:
+
+        for element in h1.find_all_next(
+            ["p"]
+        ):
+
+            text = _clean_feed_text(
+                element.get_text(
+                    " ",
+                    strip=True
+                )
+            )
+
+            if len(text) >= 50:
+
+                return _short_feed_description(
+                    text
+                )
+
+    return ""
+
+
+# ============================================================
+# FEED: ARTICLE DATE FROM PAGE
+# ============================================================
+
+def _extract_article_date(
+    soup: BeautifulSoup
+) -> str:
+
+    # --------------------------------------------------------
+    # time datetime
+    # --------------------------------------------------------
+
+    for time_tag in soup.find_all(
+        "time"
+    ):
+
+        datetime_value = (
+            time_tag.get(
+                "datetime",
+                ""
+            ).strip()
+        )
+
+        parsed = _parse_article_date(
+            datetime_value
+        )
+
+        if parsed:
+            return parsed
+
+        visible_text = (
+            time_tag.get_text(
+                " ",
+                strip=True
+            )
+        )
+
+        parsed = _parse_article_date(
+            visible_text
+        )
+
+        if parsed:
+            return parsed
+
+    # --------------------------------------------------------
+    # Ищем русскую дату в тексте
+    # --------------------------------------------------------
+
+    text = soup.get_text(
         " ",
         strip=True
     )
 
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    ).strip()
-
-    if len(text) <= limit:
-        return text
-
-    return (
-        text[:limit]
-        .rsplit(" ", 1)[0]
-        .rstrip(".,;:!?")
-        + "..."
+    match = re.search(
+        r"\b\d{1,2}\s+"
+        r"(?:января|февраля|марта|апреля|мая|июня|"
+        r"июля|августа|сентября|октября|ноября|декабря)"
+        r"(?:\s+\d{4})?\b",
+        text.lower()
     )
 
+    if match:
+
+        return _parse_article_date(
+            match.group(0)
+        )
+
+    return ""
+
 
 # ============================================================
-# FEED: NEWS SOURCE
+# FEED: ARTICLE TITLE
 # ============================================================
 
-def _fetch_news_feed(
-    feed_url: str
+def _extract_article_title(
+    soup: BeautifulSoup
+) -> str:
+
+    h1 = soup.find("h1")
+
+    if h1:
+
+        title = _clean_feed_text(
+            h1.get_text(
+                " ",
+                strip=True
+            )
+        )
+
+        if title:
+            return title
+
+    meta = soup.find(
+        "meta",
+        attrs={
+            "property": "og:title"
+        }
+    )
+
+    if meta:
+
+        title = (
+            meta.get(
+                "content",
+                ""
+            ).strip()
+        )
+
+        if title:
+            return title
+
+    if soup.title:
+
+        title = _clean_feed_text(
+            soup.title.get_text(
+                " ",
+                strip=True
+            )
+        )
+
+        if title:
+            return title
+
+    return ""
+
+
+# ============================================================
+# FEED: LOAD SINGLE ARTICLE
+# ============================================================
+
+def _fetch_feed_article(
+    article
 ):
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 "
-            "(compatible; WineAppFeed/1.0; "
-            "+https://vino-svoe.ru)"
+    article_url = article["url"]
+    category = article["category"]
+
+    try:
+
+        response = requests.get(
+            article_url,
+            headers=FEED_HEADERS,
+            timeout=FEED_ARTICLE_TIMEOUT
         )
-    }
 
-    response = requests.get(
-        feed_url,
-        headers=headers,
-        timeout=FEED_NEWS_TIMEOUT
-    )
+        response.raise_for_status()
 
-    response.raise_for_status()
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
 
-    root = ET.fromstring(
-        response.content
-    )
+        title = _extract_article_title(
+            soup
+        )
 
-    feed_title = _xml_child_text(
-        root,
-        {"title"}
-    )
+        if not title:
+            return None
 
-    if not feed_title:
-        feed_title = urlparse(
-            feed_url
-        ).netloc
+        description = (
+            _extract_article_description(
+                soup
+            )
+        )
 
-    elements = [
-        element
-        for element in root.iter()
-        if _xml_local_name(
-            element.tag
-        ) in {
-            "item",
-            "entry"
+        image_url = (
+            _extract_article_image(
+                soup
+            )
+        )
+
+        published_at = (
+            _extract_article_date(
+                soup
+            )
+        )
+
+        if not published_at:
+
+            print(
+                f"[FEED][ARTICLE] "
+                f"Не удалось определить дату: "
+                f"{article_url}",
+                flush=True
+            )
+
+            return None
+
+        return {
+            "title": title,
+            "description": description,
+            "url": article_url,
+            "image_url": image_url,
+            "source": (
+                f"Своё Вино · {category}"
+            ),
+            "published_at": published_at,
         }
-    ]
 
-    result = []
+    except Exception as e:
 
-    for element in elements:
-
-        title = _xml_child_text(
-            element,
-            {"title"}
+        print(
+            f"[FEED][ARTICLE] "
+            f"Ошибка {article_url}: {e}",
+            flush=True
         )
 
-        url = _xml_link(
-            element,
-            feed_url
-        )
-
-        published_raw = _xml_child_text(
-            element,
-            {
-                "pubdate",
-                "published",
-                "updated",
-                "date"
-            }
-        )
-
-        published_at = _parse_feed_datetime(
-            published_raw
-        )
-
-        description_raw = _xml_child_text(
-            element,
-            {
-                "description",
-                "summary",
-                "content",
-                "encoded"
-            }
-        )
-
-        if (
-            not title
-            or not url
-            or not published_at
-        ):
-            continue
-
-        result.append({
-            "title": BeautifulSoup(
-                title,
-                "html.parser"
-            ).get_text(
-                " ",
-                strip=True
-            ),
-
-            "description":
-                _short_feed_description(
-                    description_raw
-                ),
-
-            "url": url,
-
-            "image_url":
-                _xml_image_url(
-                    element,
-                    description_raw,
-                    feed_url
-                ),
-
-            "source": BeautifulSoup(
-                feed_title,
-                "html.parser"
-            ).get_text(
-                " ",
-                strip=True
-            ),
-
-            "published_at":
-                published_at,
-        })
-
-    return result
+        return None
 
 
 # ============================================================
@@ -800,49 +1263,238 @@ def _fetch_news_feed(
 
 def _load_feed_news():
 
-    all_news = []
+    # --------------------------------------------------------
+    # 1. Автоматически ищем подразделы
+    # --------------------------------------------------------
 
-    for feed_url in FEED_NEWS_SOURCES:
+    try:
+
+        categories = (
+            _discover_feed_categories()
+        )
+
+    except Exception as e:
+
+        print(
+            f"[FEED][CATEGORIES] "
+            f"Ошибка загрузки категорий: {e}",
+            flush=True
+        )
+
+        traceback.print_exc()
+
+        categories = []
+
+    # Если подразделы не нашли,
+    # всё равно пробуем главную страницу.
+    if not categories:
+
+        categories = [
+            {
+                "url":
+                    FEED_ARTICLES_CATEGORY_URL,
+                "name":
+                    "Статьи"
+            }
+        ]
+
+    # --------------------------------------------------------
+    # 2. Собираем URL статей
+    # --------------------------------------------------------
+
+    category_articles = []
+
+    for category in categories:
 
         try:
 
-            all_news.extend(
-                _fetch_news_feed(
-                    feed_url
-                )
+            items = _fetch_category_articles(
+                category["url"],
+                category["name"]
+            )
+
+            category_articles.extend(
+                items
             )
 
         except Exception as e:
 
             print(
-                f"[FEED][NEWS] Не удалось "
-                f"загрузить {feed_url}: {e}",
+                f"[FEED][CATEGORY] "
+                f"Не удалось загрузить "
+                f"{category['url']}: {e}",
                 flush=True
             )
 
-    # Дедупликация по URL.
-    unique = {}
+    # --------------------------------------------------------
+    # 3. Дедупликация
+    # --------------------------------------------------------
 
-    for item in all_news:
-        unique.setdefault(
+    unique_articles = {}
+
+    for item in category_articles:
+
+        unique_articles.setdefault(
+            item["url"],
+            item
+        )
+
+    candidates = list(
+        unique_articles.values()
+    )
+
+    if not candidates:
+
+        raise RuntimeError(
+            "На странице "
+            f"{FEED_ARTICLES_CATEGORY_URL} "
+            "не найдено статей"
+        )
+
+    # --------------------------------------------------------
+    # 4. Группировка по подразделам
+    # --------------------------------------------------------
+
+    grouped = {}
+
+    for item in candidates:
+
+        grouped.setdefault(
+            item["category"],
+            []
+        ).append(
+            item
+        )
+
+    # --------------------------------------------------------
+    # 5. Сначала берём по одной статье
+    #    из каждого подраздела
+    # --------------------------------------------------------
+
+    selected = []
+    selected_urls = set()
+
+    for category_name in sorted(
+        grouped.keys()
+    ):
+
+        category_items = grouped[
+            category_name
+        ]
+
+        if not category_items:
+            continue
+
+        item = category_items[0]
+
+        if item["url"] not in selected_urls:
+
+            selected.append(
+                item
+            )
+
+            selected_urls.add(
+                item["url"]
+            )
+
+    # --------------------------------------------------------
+    # 6. Добиваем список остальными статьями
+    # --------------------------------------------------------
+
+    for item in candidates:
+
+        if len(selected) >= (
+            FEED_NEWS_LIMIT * 2
+        ):
+            break
+
+        if item["url"] in selected_urls:
+            continue
+
+        selected.append(
+            item
+        )
+
+        selected_urls.add(
+            item["url"]
+        )
+
+    # --------------------------------------------------------
+    # 7. Загружаем страницы статей
+    #
+    # Только при обновлении cache.
+    # --------------------------------------------------------
+
+    with ThreadPoolExecutor(
+        max_workers=8
+    ) as executor:
+
+        results = list(
+            executor.map(
+                _fetch_feed_article,
+                selected
+            )
+        )
+
+    news = [
+        item
+        for item in results
+        if item is not None
+    ]
+
+    # --------------------------------------------------------
+    # 8. Финальная дедупликация
+    # --------------------------------------------------------
+
+    unique_news = {}
+
+    for item in news:
+
+        unique_news.setdefault(
             item["url"],
             item
         )
 
     news = list(
-        unique.values()
+        unique_news.values()
     )
 
-    # Самые новые сначала.
+    # --------------------------------------------------------
+    # 9. Самые новые сверху
+    # --------------------------------------------------------
+
     news.sort(
         key=lambda item:
             item["published_at"],
         reverse=True
     )
 
-    return news[
+    # --------------------------------------------------------
+    # 10. Ограничение
+    # --------------------------------------------------------
+
+    news = news[
         :FEED_NEWS_LIMIT
     ]
+
+    print(
+        f"[FEED][NEWS] "
+        f"Итоговое количество статей: "
+        f"{len(news)}",
+        flush=True
+    )
+
+    for item in news:
+
+        print(
+            f"[FEED][NEWS] "
+            f"{item['published_at']} | "
+            f"{item['source']} | "
+            f"{item['title']}",
+            flush=True
+        )
+
+    return news
 
 
 # ============================================================
@@ -855,17 +1507,8 @@ def _fetch_feed_wine(
     """
     Лёгкая версия find_by_slug().
 
-    В отличие от find_by_slug():
-    - не скачивает картинку;
-    - не кодирует её в base64;
-    - не собирает описание;
-    - не собирает рейтинг;
-    - не собирает блюда.
-
-    Нужны только:
-        slug
-        name
-        image_url
+    Не скачивает изображение.
+    Не конвертирует изображение в base64.
     """
 
     wine_url = (
@@ -879,57 +1522,78 @@ def _fetch_feed_wine(
             "AppleWebKit/537.36"
     }
 
-    response = requests.get(
-        wine_url,
-        headers=headers,
-        timeout=FEED_WINE_TIMEOUT
-    )
+    try:
 
-    response.raise_for_status()
-
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser"
-    )
-
-    name_tag = soup.find(
-        "h1",
-        class_="wine-main-title-block__title"
-    )
-
-    image_tag = soup.find(
-        "img",
-        class_="wine-hero-block__bottle"
-    )
-
-    name = (
-        name_tag.get_text(strip=True)
-        if name_tag
-        else ""
-    )
-
-    image_src = (
-        image_tag.get("src")
-        if image_tag
-        else ""
-    )
-
-    if not name or not image_src:
-        return None
-
-    if image_src.startswith("/"):
-        image_url = (
-            f"{IMAGE_BASE_URL}"
-            f"{image_src}"
+        response = requests.get(
+            wine_url,
+            headers=headers,
+            timeout=FEED_WINE_TIMEOUT
         )
-    else:
-        image_url = image_src
 
-    return {
-        "slug": slug,
-        "name": name,
-        "image_url": image_url,
-    }
+        response.raise_for_status()
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+        name_tag = soup.find(
+            "h1",
+            class_="wine-main-title-block__title"
+        )
+
+        image_tag = soup.find(
+            "img",
+            class_="wine-hero-block__bottle"
+        )
+
+        name = (
+            name_tag.get_text(
+                strip=True
+            )
+            if name_tag
+            else ""
+        )
+
+        image_src = (
+            image_tag.get(
+                "src",
+                ""
+            )
+            if image_tag
+            else ""
+        )
+
+        if not name or not image_src:
+            return None
+
+        image_url = _absolute_site_url(
+            image_src
+        )
+
+        # Если картинка относительная
+        # и должна идти через API vino-svoe.
+        if image_src.startswith("/"):
+            image_url = (
+                f"{IMAGE_BASE_URL}"
+                f"{image_src}"
+            )
+
+        return {
+            "slug": slug,
+            "name": name,
+            "image_url": image_url,
+        }
+
+    except Exception as e:
+
+        print(
+            f"[FEED][WINE] "
+            f"Ошибка загрузки {slug}: {e}",
+            flush=True
+        )
+
+        return None
 
 
 # ============================================================
@@ -941,9 +1605,14 @@ def _load_feed_wines():
     candidates = []
     seen = set()
 
-    # Берём существующий FAISS -> slug mapping.
-    # Никакой отдельной БД для ленты не создаём.
-    for wine_id in sorted(id_to_slug):
+    # Берём существующий mapping:
+    #
+    # FAISS ID -> slug
+    #
+    # Никакой новой БД не создаём.
+    for wine_id in sorted(
+        id_to_slug
+    ):
 
         slug = clean_feed_wine_slug(
             id_to_slug[wine_id]
@@ -955,7 +1624,9 @@ def _load_feed_wines():
         if slug in seen:
             continue
 
-        seen.add(slug)
+        seen.add(
+            slug
+        )
 
         candidates.append(
             slug
@@ -965,16 +1636,15 @@ def _load_feed_wines():
             break
 
     if not candidates:
+
         raise RuntimeError(
             f"Не удалось сформировать "
             f"список вин из "
             f"{MAPPING_FILE_PATH}"
         )
 
-    # Эти запросы выполняются только во время
-    # обновления 6-часового cache.
-    #
-    # На обычный GET /feed они НЕ выполняются.
+    # Запросы выполняются только
+    # во время обновления кэша.
     with ThreadPoolExecutor(
         max_workers=8
     ) as executor:
@@ -1016,26 +1686,44 @@ def _build_feed_response() -> bytes:
     wines = _load_feed_wines()
 
     if not news:
-        raise RuntimeError("Не удалось получить новости для винной ленты")
+
+        raise RuntimeError(
+            "Не удалось получить "
+            "новости для винной ленты"
+        )
 
     if not wines:
-        raise RuntimeError("Не удалось получить вина для винной ленты")
+
+        raise RuntimeError(
+            "Не удалось получить "
+            "вина для винной ленты"
+        )
 
     payload = FeedResponse(
         status="success",
         feed=FeedPayload(
-            news=[FeedNewsItem(**item) for item in news],
-            wines=[FeedWineItem(**item) for item in wines],
+            news=[
+                FeedNewsItem(
+                    **item
+                )
+                for item in news
+            ],
+            wines=[
+                FeedWineItem(
+                    **item
+                )
+                for item in wines
+            ],
         )
     )
 
-    # Pydantic v2: .json(ensure_ascii=..., separators=...) больше не поддерживается,
-    # используем model_dump() + обычный json.dumps().
     return json.dumps(
         payload.model_dump(),
         ensure_ascii=False,
         separators=(",", ":")
-    ).encode("utf-8")
+    ).encode(
+        "utf-8"
+    )
 
 
 # ============================================================
@@ -1074,6 +1762,7 @@ def _feed_response(
     }
 
     if stale:
+
         headers[
             "X-Feed-Cache"
         ] = "stale"
@@ -1083,12 +1772,6 @@ def _feed_response(
         media_type="application/json",
         headers=headers,
     )
-
-
-print(
-    "Ожидание запросов\n",
-    flush=True
-)
 
 
 # ============================================================
@@ -1155,7 +1838,9 @@ def save_crop_for_debugging(
 
         b64 = base64.b64encode(
             buffer.getvalue()
-        ).decode("utf-8")
+        ).decode(
+            "utf-8"
+        )
 
         print(
             f"[DEBUG_CROP_BASE64_START] "
@@ -1207,8 +1892,13 @@ def letterbox_preprocess(
         input_size[1] / w
     )
 
-    nh = int(h * scale)
-    nw = int(w * scale)
+    nh = int(
+        h * scale
+    )
+
+    nw = int(
+        w * scale
+    )
 
     resized = cv2.resize(
         img_bgr,
@@ -1330,7 +2020,7 @@ def get_dinov2_embedding(
 
 
 # ============================================================
-# ФИЛЬТР "ЭТО ВООБЩЕ ПОХОЖЕ НА ВИНО?"
+# ФИЛЬТР
 # ============================================================
 
 def is_wine_photo(
@@ -1359,8 +2049,6 @@ def run_ml_pipeline(
     input_height
 ):
 
-    # 1. PIL -> NumPy -> BGR
-
     img_np = np.array(
         image
     )
@@ -1369,8 +2057,6 @@ def run_ml_pipeline(
         img_np,
         cv2.COLOR_RGB2BGR
     )
-
-    # 2. Letterbox
 
     input_tensor, scale, pad = (
         letterbox_preprocess(
@@ -1382,8 +2068,6 @@ def run_ml_pipeline(
         )
     )
 
-    # 3. YOLO
-
     outputs = session.run(
         None,
         {
@@ -1394,9 +2078,6 @@ def run_ml_pipeline(
 
     prediction = outputs[0]
 
-    # 4. Приводим prediction
-    # к форме (8400, N)
-
     pred = prediction[0]
 
     if (
@@ -1404,9 +2085,8 @@ def run_ml_pipeline(
         <
         pred.shape[1]
     ):
-        pred = pred.T
 
-    # 5. Лучшая детекция
+        pred = pred.T
 
     scores = np.max(
         pred[:, 4:],
@@ -1426,9 +2106,6 @@ def run_ml_pipeline(
         f"{best_score:.4f}",
         flush=True
     )
-
-    # 6. По умолчанию
-    # используется всё фото
 
     x_min = 0
     y_min = 0
@@ -1576,8 +2253,6 @@ def run_ml_pipeline(
             flush=True
         )
 
-    # 7. Crop
-
     if (
         box_detected
         and x_max > x_min
@@ -1598,14 +2273,10 @@ def run_ml_pipeline(
             flush=True
         )
 
-    # 8. Debug
-
     save_crop_for_debugging(
         image,
         label="dinov2_input"
     )
-
-    # 9. DINOv2
 
     embedding = (
         get_dinov2_embedding(
@@ -1638,8 +2309,6 @@ def run_ml_pipeline(
             f"({index.d})."
         )
 
-    # 10. FAISS
-
     query = embedding.reshape(
         1,
         -1
@@ -1671,6 +2340,7 @@ def run_ml_pipeline(
     )
 
     if wine_id == -1:
+
         raise Exception(
             "FAISS не нашёл совпадений"
         )
@@ -1954,106 +2624,292 @@ def find_by_slug(
         wine_image
     )
 
-def somelier(wine_slug):
-    wine_url = f"{SITE_BASE_URL}/wines/{wine_slug}"
+
+# ============================================================
+# SOMELIER
+# ============================================================
+
+def somelier(
+    wine_slug
+):
+
+    wine_url = (
+        f"{SITE_BASE_URL}/wines/{wine_slug}"
+    )
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Referer": SITE_BASE_URL
+        "User-Agent":
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/120.0.0.0 "
+            "Safari/537.36",
+
+        "Accept":
+            "text/html,application/xhtml+xml,"
+            "application/xml;q=0.9,image/avif,"
+            "image/webp,*/*;q=0.8",
+
+        "Referer":
+            SITE_BASE_URL
     }
 
     recommended_wines = []
 
     with requests.Session() as session:
-        session.headers.update(headers)
+
+        session.headers.update(
+            headers
+        )
+
         try:
-            response = session.get(wine_url, timeout=5)
+
+            response = session.get(
+                wine_url,
+                timeout=5
+            )
 
             if response.status_code == 200:
-                soup = BeautifulSoup(response.text, "html.parser")
-                recommendation_cards = soup.find_all('a', class_='wine-item', limit=5)
 
-                for idx, card in enumerate(recommendation_cards, 1):
-                    # 1. Извлекаем название
-                    title_tag = card.find('h2', class_='wine-item__title') or card.find('p', class_='wine-item__title')
-                    title_text = title_tag.text.strip() if title_tag else f"Вино #{idx}"
+                soup = BeautifulSoup(
+                    response.text,
+                    "html.parser"
+                )
 
-                    card_image_b64 = "Нет картинки"
+                recommendation_cards = (
+                    soup.find_all(
+                        "a",
+                        class_="wine-item",
+                        limit=5
+                    )
+                )
 
-                    # 2. Ищем ТОЧНО тег картинки вина по классу 'wine-item__img'
-                    img_tag = card.find('img', class_='wine-item__img')
+                for idx, card in enumerate(
+                    recommendation_cards,
+                    1
+                ):
 
-                    # Если по классу не нашлось, ищем тег img внутри контейнера 'wine-item__img-container'
+                    title_tag = (
+                        card.find(
+                            "h2",
+                            class_="wine-item__title"
+                        )
+                        or
+                        card.find(
+                            "p",
+                            class_="wine-item__title"
+                        )
+                    )
+
+                    title_text = (
+                        title_tag.text.strip()
+                        if title_tag
+                        else f"Вино #{idx}"
+                    )
+
+                    card_image_b64 = (
+                        "Нет картинки"
+                    )
+
+                    img_tag = card.find(
+                        "img",
+                        class_="wine-item__img"
+                    )
+
                     if not img_tag:
-                        img_container = card.find('div', class_='wine-item__img-container')
+
+                        img_container = (
+                            card.find(
+                                "div",
+                                class_=
+                                "wine-item__img-container"
+                            )
+                        )
+
                         if img_container:
-                            img_tag = img_container.find('img')
+
+                            img_tag = (
+                                img_container.find(
+                                    "img"
+                                )
+                            )
 
                     if img_tag:
-                        # 3. Берём srcset или src
-                        raw_src = img_tag.get('srcset') or img_tag.get('src')
+
+                        raw_src = (
+                            img_tag.get(
+                                "srcset"
+                            )
+                            or
+                            img_tag.get(
+                                "src"
+                            )
+                        )
 
                         if raw_src:
-                            # Парсим srcset: берем вариант с максимальным разрешением (последний в списке)
-                            if ',' in raw_src:
-                                urls = [item.strip().split(' ')[0] for item in raw_src.split(',') if item.strip()]
-                                raw_src = urls[-1] if urls else raw_src
-                            elif ' ' in raw_src:
-                                raw_src = raw_src.split(' ')[0]
 
-                            # Собираем валидный адрес (в вашем HTML это абсолютный URL https://api.vino-svoe.ru/...)
-                            img_url = urljoin(SITE_BASE_URL, raw_src)
+                            if "," in raw_src:
+
+                                urls = [
+                                    item.strip().split(" ")[0]
+                                    for item in raw_src.split(",")
+                                    if item.strip()
+                                ]
+
+                                raw_src = (
+                                    urls[-1]
+                                    if urls
+                                    else raw_src
+                                )
+
+                            elif " " in raw_src:
+
+                                raw_src = (
+                                    raw_src.split(" ")[0]
+                                )
+
+                            img_url = urljoin(
+                                SITE_BASE_URL,
+                                raw_src
+                            )
 
                             try:
-                                time.sleep(0.1)
-                                img_res = session.get(img_url, timeout=4)
 
-                                if img_res.status_code == 200 and len(img_res.content) > 0:
-                                    b64_data = base64.b64encode(img_res.content).decode('utf-8')
-                                    card_image_b64 = f"data:image/webp;base64,{b64_data}"
+                                time.sleep(
+                                    0.1
+                                )
+
+                                img_res = session.get(
+                                    img_url,
+                                    timeout=4
+                                )
+
+                                if (
+                                    img_res.status_code
+                                    == 200
+                                    and len(
+                                        img_res.content
+                                    ) > 0
+                                ):
+
+                                    b64_data = (
+                                        base64.b64encode(
+                                            img_res.content
+                                        )
+                                        .decode("utf-8")
+                                    )
+
+                                    card_image_b64 = (
+                                        "data:image/webp;base64,"
+                                        f"{b64_data}"
+                                    )
+
                                 else:
-                                    print(f"[SITE #{idx}] Ошибка {img_res.status_code} по ссылке: {img_url}",
-                                          flush=True)
+
+                                    print(
+                                        f"[SITE #{idx}] "
+                                        f"Ошибка "
+                                        f"{img_res.status_code} "
+                                        f"по ссылке: "
+                                        f"{img_url}",
+                                        flush=True
+                                    )
 
                             except Exception as e:
-                                print(f"[SITE #{idx}] Ошибка скачивания картинки '{title_text}': {e}", flush=True)
 
-                    recommended_wines.append([title_text, card_image_b64])
+                                print(
+                                    f"[SITE #{idx}] "
+                                    f"Ошибка скачивания "
+                                    f"картинки "
+                                    f"'{title_text}': "
+                                    f"{e}",
+                                    flush=True
+                                )
+
+                    recommended_wines.append(
+                        [
+                            title_text,
+                            card_image_b64
+                        ]
+                    )
 
         except Exception as e:
-            print(f"[SITE] Не удалось распарсить страницу: {e}", flush=True)
+
+            print(
+                f"[SITE] Не удалось "
+                f"распарсить страницу: {e}",
+                flush=True
+            )
+
             traceback.print_exc()
 
     if not recommended_wines:
-        recommended_wines = [["Нет информации", "Нет картинки"] for _ in range(5)]
+
+        recommended_wines = [
+            [
+                "Нет информации",
+                "Нет картинки"
+            ]
+            for _ in range(5)
+        ]
 
     return recommended_wines
+
+
 # ============================================================
 # FETCH WINE
 # ============================================================
 
-def fetch_wine_data(wine_id):
+def fetch_wine_data(
+    wine_id
+):
 
-    wine_slug = id_to_slug.get(wine_id)
+    wine_slug = id_to_slug.get(
+        wine_id
+    )
 
     if wine_slug is None:
+
         raise Exception(
             f"Индекс {wine_id} есть в FAISS, "
-            f"но отсутствует в {MAPPING_FILE_PATH}"
+            f"но отсутствует в "
+            f"{MAPPING_FILE_PATH}"
         )
+
     (
-        wine_url, wine_slug, description, wine_name, factory,
-        rate, atcc_list, num_list, dishes_list, wine_image
-    ) = find_by_slug(wine_slug)
+        wine_url,
+        wine_slug,
+        description,
+        wine_name,
+        factory,
+        rate,
+        atcc_list,
+        num_list,
+        dishes_list,
+        wine_image
+    ) = find_by_slug(
+        wine_slug
+    )
 
-    # Получаем сомелье-рекомендации
-    recommended_wines = somelier(wine_slug)
+    recommended_wines = (
+        somelier(
+            wine_slug
+        )
+    )
 
-    # Возвращаем ВСЕ 11 элементов единым плоским кортежем
     return (
-        wine_url, wine_slug, description, wine_name, factory,
-        rate, atcc_list, num_list, dishes_list, wine_image, recommended_wines
+        wine_url,
+        wine_slug,
+        description,
+        wine_name,
+        factory,
+        rate,
+        atcc_list,
+        num_list,
+        dishes_list,
+        wine_image,
+        recommended_wines
     )
 
 
@@ -2062,12 +2918,29 @@ def fetch_wine_data(wine_id):
 # ============================================================
 
 def parsed_info(
-    wine_url, wine_slug, description, wine_name, factory,
-    rate, atcc_list, num_list, dishes_list, wine_image, recommended_wines
+    wine_url,
+    wine_slug,
+    description,
+    wine_name,
+    factory,
+    rate,
+    atcc_list,
+    num_list,
+    dishes_list,
+    wine_image,
+    recommended_wines
 ):
 
-    def pick(lst, i):
-        return lst[i] if len(lst) > i else "Нет информации"
+    def pick(
+        lst,
+        i
+    ):
+
+        return (
+            lst[i]
+            if len(lst) > i
+            else "Нет информации"
+        )
 
     payload = {
         "status": "success",
@@ -2077,30 +2950,62 @@ def parsed_info(
             "description": description,
             "factory": factory,
             "rate": rate,
-            "area": pick(atcc_list, 0),
-            "sort": pick(atcc_list, 1),
-            "type": pick(atcc_list, 2),
-            "color": pick(atcc_list, 3),
-            "temperature": pick(num_list, 0),
-            "alcohol": pick(num_list, 1),
+            "area": pick(
+                atcc_list,
+                0
+            ),
+            "sort": pick(
+                atcc_list,
+                1
+            ),
+            "type": pick(
+                atcc_list,
+                2
+            ),
+            "color": pick(
+                atcc_list,
+                3
+            ),
+            "temperature": pick(
+                num_list,
+                0
+            ),
+            "alcohol": pick(
+                num_list,
+                1
+            ),
             "dishes": dishes_list,
             "wine_image": wine_image,
             "top5": recommended_wines
         }
     }
 
-    json_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    json_bytes = json.dumps(
+        payload,
+        ensure_ascii=False
+    ).encode(
+        "utf-8"
+    )
 
-    print("[END] Запрос успешно обработан, отправляем ответ.", flush=True)
+    print(
+        "[END] Запрос успешно обработан, "
+        "отправляем ответ.",
+        flush=True
+    )
 
     return Response(
         content=json_bytes,
         media_type="application/json",
         headers={
-            "Content-Length": str(len(json_bytes)),
-            "Cache-Control": "no-transform"
+            "Content-Length":
+                str(
+                    len(json_bytes)
+                ),
+            "Cache-Control":
+                "no-transform"
         }
     )
+
 
 # ============================================================
 # /feed
@@ -2116,14 +3021,7 @@ async def get_feed():
     global _feed_cache_timestamp
 
     # --------------------------------------------------------
-    # Быстрый путь:
-    # cache ещё действителен.
-    #
-    # Здесь НЕ происходит:
-    # - запросов новостей;
-    # - запросов vino-svoe.ru;
-    # - работы с FAISS;
-    # - формирования JSON.
+    # Быстрый путь
     # --------------------------------------------------------
 
     if _feed_cache_is_valid():
@@ -2131,15 +3029,13 @@ async def get_feed():
         return _feed_response()
 
     # --------------------------------------------------------
-    # Cache истёк.
-    #
-    # Только один запрос обновляет его.
+    # Обновление cache
     # --------------------------------------------------------
 
     async with _feed_cache_lock:
 
-        # Пока текущий запрос ждал lock,
-        # другой запрос уже мог обновить cache.
+        # Пока ждали lock,
+        # другой запрос мог обновить cache.
 
         if _feed_cache_is_valid():
 
@@ -2147,8 +3043,8 @@ async def get_feed():
 
         try:
 
-            # requests блокирующий, поэтому обновление
-            # выполняется вне event loop.
+            # requests блокирующий,
+            # поэтому уходим из event loop.
             new_cache = await asyncio.to_thread(
                 _build_feed_response
             )
@@ -2180,9 +3076,8 @@ async def get_feed():
 
             traceback.print_exc()
 
-            # Если старый cache существует,
-            # лучше отдать его, чем полностью
-            # сломать экран ленты.
+            # Если есть старый cache,
+            # отдаём его.
             if _feed_cache_bytes is not None:
 
                 print(
@@ -2221,7 +3116,9 @@ async def recognize_wine(
         flush=True
     )
 
-    # 1. BASE64 -> PIL
+    # --------------------------------------------------------
+    # BASE64 -> PIL
+    # --------------------------------------------------------
 
     try:
 
@@ -2238,7 +3135,9 @@ async def recognize_wine(
             io.BytesIO(
                 image_data
             )
-        ).convert("RGB")
+        ).convert(
+            "RGB"
+        )
 
         orig_w, orig_h = (
             image.size
@@ -2261,7 +3160,9 @@ async def recognize_wine(
             )
         )
 
-    # 2. ML + mapping + site
+    # --------------------------------------------------------
+    # ML + mapping + site
+    # --------------------------------------------------------
 
     try:
 
@@ -2318,12 +3219,25 @@ async def recognize_wine(
                     "не распознано"
                 )
             )
+
         if similarity < 0.8:
-            print(f"[FILTER] Совпадение отброшено: Top-1 F1 ({similarity:.4f}) < 0.80", flush=True)
+
+            print(
+                "[FILTER] Совпадение "
+                f"отброшено: "
+                f"Top-1 F1 "
+                f"({similarity:.4f}) < 0.80",
+                flush=True
+            )
+
             raise HTTPException(
                 status_code=404,
-                detail="Точного совпадения в базе не найдено"
+                detail=(
+                    "Точного совпадения "
+                    "в базе не найдено"
+                )
             )
+
         result = await asyncio.to_thread(
             fetch_wine_data,
             wine_id
@@ -2429,7 +3343,9 @@ async def test_by_slug(
             io.BytesIO(
                 image_data
             )
-        ).convert("RGB")
+        ).convert(
+            "RGB"
+        )
 
         orig_w, orig_h = (
             image.size
@@ -2515,7 +3431,9 @@ async def test_by_slug(
     json_bytes = json.dumps(
         payload,
         ensure_ascii=False
-    ).encode("utf-8")
+    ).encode(
+        "utf-8"
+    )
 
     return Response(
         content=json_bytes,
