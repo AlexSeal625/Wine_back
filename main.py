@@ -227,7 +227,9 @@ class ImageRequest(BaseModel):
 class WineSlug(BaseModel):
     memory_slug: str
 
-
+class ImageTest(BaseModel):
+    test_slug: str
+    
 print("Ожидание запросов\n", flush=True)
 
 
@@ -775,6 +777,49 @@ async def memory_wine(data: WineSlug):
         raise HTTPException(status_code=500, detail=str(e))
 
     return parsed_info(*result)
+
+
+@app.post("/api/test_for_slug")
+async def test_by_slug(data: ImageTest):
+    try:
+        pure_base64 = data.test_slug.split(",")[-1]
+        image_data = base64.b64decode(pure_base64)
+        image = Image.open(io.BytesIO(image_data)).convert("RGB")
+        orig_w, orig_h = image.size
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Некорректная base64 строка: {str(e)}")
+
+    try:
+        wine_id, distance, _ = await asyncio.to_thread(
+            run_ml_pipeline, image, orig_w, orig_h, 640, 640
+        )
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT wine_slug FROM wines WHERE id = %s;", (wine_id,))
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if not result:
+            raise HTTPException(status_code=404, detail=f"Индекс {wine_id} найден в FAISS, но отсутствует в БД")
+
+        wine_slug = result[0]
+
+    except HTTPException as http_ex:
+        raise http_ex
+    except Exception as e:
+        print(f"[ERROR] Сбой в пайплайне: {str(e)}", flush=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    payload = {"wine_slug":wine_slug}
+    json_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    return Response(
+        content=json_bytes,
+        media_type="application/json",
+        headers={"Content-Length": str(len(json_bytes)), "Cache-Control": "no-transform"}
+    )
 
 
 # ============================================================
