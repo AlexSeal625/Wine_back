@@ -7,6 +7,8 @@ import asyncio
 import traceback
 import re
 import time
+import html
+import xml.etree.ElementTree as ET
 
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin, urlparse
@@ -337,18 +339,86 @@ class FeedResponse(BaseModel):
 # 6 часов
 FEED_CACHE_TTL = 6 * 60 * 60
 
-# Количество элементов
+# Количество элементов в итоговой ленте
 FEED_NEWS_LIMIT = 20
 FEED_WINE_LIMIT = 30
+
+# Сколько статей максимум берём с каждого подраздела.
+#
+# Этого достаточно, чтобы после загрузки страниц статей
+# выбрать самые свежие материалы и одновременно
+# гарантировать наличие материалов каждого раздела.
+FEED_ARTICLES_PER_CATEGORY = 8
 
 # Таймауты внешних запросов
 FEED_CATEGORY_TIMEOUT = 8
 FEED_ARTICLE_TIMEOUT = 8
 FEED_WINE_TIMEOUT = 5
 
-# Главная страница раздела статей
-FEED_ARTICLES_CATEGORY_URL = (
-    f"{SITE_BASE_URL}/category/articles"
+# ------------------------------------------------------------
+# HTTP headers для сайта
+# ------------------------------------------------------------
+
+FEED_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 "
+        "(Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 "
+        "(KHTML, like Gecko) "
+        "Chrome/154.0.0.0 "
+        "Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,"
+        "application/xml;q=0.9,"
+        "image/avif,image/webp,"
+        "*/*;q=0.8"
+    ),
+    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+    "Referer": SITE_BASE_URL,
+    "Connection": "keep-alive",
+}
+
+# ------------------------------------------------------------
+# ФИКСИРОВАННЫЕ ПОДРАЗДЕЛЫ САЙТА
+# ------------------------------------------------------------
+
+FEED_ARTICLE_CATEGORIES = (
+    {
+        "slug": "vino",
+        "name": "Вино",
+        "url": f"{SITE_BASE_URL}/category/articles/vino",
+    },
+    {
+        "slug": "story",
+        "name": "Истории",
+        "url": f"{SITE_BASE_URL}/category/articles/story",
+    },
+    {
+        "slug": "news",
+        "name": "Новости",
+        "url": f"{SITE_BASE_URL}/category/articles/news",
+    },
+    {
+        "slug": "sobytiya",
+        "name": "События",
+        "url": f"{SITE_BASE_URL}/category/articles/sobytiya",
+    },
+    {
+        "slug": "koktejli",
+        "name": "Коктейли",
+        "url": f"{SITE_BASE_URL}/category/articles/koktejli",
+    },
+    {
+        "slug": "intervyu",
+        "name": "Интервью",
+        "url": f"{SITE_BASE_URL}/category/articles/intervyu",
+    },
+    {
+        "slug": "instrumenty",
+        "name": "Инструменты",
+        "url": f"{SITE_BASE_URL}/category/articles/instrumenty",
+    },
 )
 
 # Уже сериализованный JSON
@@ -458,7 +528,7 @@ def _clean_feed_text(
         return ""
 
     text = BeautifulSoup(
-        value,
+        html.unescape(str(value)),
         "html.parser"
     ).get_text(
         " ",
@@ -497,38 +567,19 @@ def _short_feed_description(
 
 
 # ============================================================
-# FEED: DISCOVER CATEGORIES
+# FEED: FIND ARTICLE LINKS
 # ============================================================
 
-def _discover_feed_categories():
+def _extract_article_links(
+    soup: BeautifulSoup
+):
 
-    """
-    Заходит на:
+    links = []
+    seen = set()
 
-        /category/articles
-
-    и автоматически ищет ссылки
-    на подразделы этого раздела.
-    """
-
-    response = requests.get(
-        FEED_ARTICLES_CATEGORY_URL,
-        headers=FEED_HEADERS,
-        timeout=FEED_CATEGORY_TIMEOUT
-    )
-
-    response.raise_for_status()
-
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser"
-    )
-
-    categories = {}
-
-    base_host = urlparse(
-        SITE_BASE_URL
-    ).netloc
+    # --------------------------------------------------------
+    # Сначала ищем обычные ссылки
+    # --------------------------------------------------------
 
     for link in soup.find_all(
         "a",
@@ -547,97 +598,6 @@ def _discover_feed_categories():
             href
         )
 
-        try:
-
-            parsed = urlparse(
-                absolute_url
-            )
-
-        except Exception:
-
-            continue
-
-        if (
-            parsed.netloc
-            and parsed.netloc != base_host
-        ):
-            continue
-
-        path = parsed.path.rstrip("/")
-
-        if not path.startswith(
-            "/category/articles/"
-        ):
-            continue
-
-        if path == "/category/articles":
-            continue
-
-        name = _clean_feed_text(
-            link.get_text(
-                " ",
-                strip=True
-            )
-        )
-
-        if not name:
-            continue
-
-        categories[
-            absolute_url
-        ] = name
-
-    result = [
-        {
-            "url": url,
-            "name": name
-        }
-        for url, name in categories.items()
-    ]
-
-    print(
-        f"[FEED][CATEGORIES] "
-        f"Найдено подразделов: {len(result)}",
-        flush=True
-    )
-
-    for category in result:
-
-        print(
-            f"[FEED][CATEGORIES] "
-            f"{category['name']} -> "
-            f"{category['url']}",
-            flush=True
-        )
-
-    return result
-
-
-# ============================================================
-# FEED: FIND ARTICLE LINKS
-# ============================================================
-
-def _extract_article_links(
-    soup: BeautifulSoup
-):
-
-    links = []
-    seen = set()
-
-    for link in soup.find_all(
-        "a",
-        href=True
-    ):
-
-        href = link.get(
-            "href",
-            ""
-        ).strip()
-
-        absolute_url = _absolute_site_url(
-            href
-        )
-
         if not _is_article_url(
             absolute_url
         ):
@@ -650,7 +610,7 @@ def _extract_article_links(
         clean_url = (
             f"{parsed.scheme}://"
             f"{parsed.netloc}"
-            f"{parsed.path}"
+            f"{parsed.path.rstrip('/')}"
         )
 
         if clean_url in seen:
@@ -664,6 +624,9 @@ def _extract_article_links(
             clean_url
         )
 
+        if len(links) >= FEED_ARTICLES_PER_CATEGORY:
+            break
+
     return links
 
 
@@ -672,44 +635,61 @@ def _extract_article_links(
 # ============================================================
 
 def _fetch_category_articles(
-    category_url: str,
-    category_name: str
+    category
 ):
 
-    response = requests.get(
-        category_url,
-        headers=FEED_HEADERS,
-        timeout=FEED_CATEGORY_TIMEOUT
-    )
+    category_url = category["url"]
+    category_name = category["name"]
+    category_slug = category["slug"]
 
-    response.raise_for_status()
+    try:
 
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser"
-    )
+        response = requests.get(
+            category_url,
+            headers=FEED_HEADERS,
+            timeout=FEED_CATEGORY_TIMEOUT
+        )
 
-    article_urls = _extract_article_links(
-        soup
-    )
+        response.raise_for_status()
 
-    result = []
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
 
-    for article_url in article_urls:
+        article_urls = _extract_article_links(
+            soup
+        )
 
-        result.append({
-            "url": article_url,
-            "category": category_name
-        })
+        result = []
 
-    print(
-        f"[FEED][CATEGORY] "
-        f"{category_name}: "
-        f"{len(result)} статей",
-        flush=True
-    )
+        for article_url in article_urls:
 
-    return result
+            result.append({
+                "url": article_url,
+                "category": category_name,
+                "category_slug": category_slug,
+            })
+
+        print(
+            f"[FEED][CATEGORY] "
+            f"{category_name}: "
+            f"найдено {len(result)} статей",
+            flush=True
+        )
+
+        return result
+
+    except Exception as e:
+
+        print(
+            f"[FEED][CATEGORY] "
+            f"Ошибка загрузки "
+            f"{category_url}: {e}",
+            flush=True
+        )
+
+        return []
 
 
 # ============================================================
@@ -779,6 +759,67 @@ def _parse_article_date(
 
     except Exception:
         pass
+
+    # --------------------------------------------------------
+    # RFC / HTTP date
+    # --------------------------------------------------------
+
+    try:
+
+        from email.utils import parsedate_to_datetime
+
+        dt = parsedate_to_datetime(
+            value
+        )
+
+        if dt.tzinfo is None:
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        return (
+            dt.astimezone(
+                timezone.utc
+            )
+            .isoformat()
+            .replace(
+                "+00:00",
+                "Z"
+            )
+        )
+
+    except Exception:
+        pass
+
+    # --------------------------------------------------------
+    # Unix timestamp
+    # --------------------------------------------------------
+
+    if value.isdigit():
+
+        try:
+
+            timestamp = int(
+                value
+            )
+
+            if timestamp > 1000000000:
+
+                dt = datetime.fromtimestamp(
+                    timestamp,
+                    tz=timezone.utc
+                )
+
+                return (
+                    dt.isoformat()
+                    .replace(
+                        "+00:00",
+                        "Z"
+                    )
+                )
+
+        except Exception:
+            pass
 
     # --------------------------------------------------------
     # Русская дата
@@ -882,6 +923,33 @@ def _extract_article_image(
                 )
 
     # --------------------------------------------------------
+    # Link image
+    # --------------------------------------------------------
+
+    image_link = soup.find(
+        "link",
+        attrs={
+            "rel": lambda value:
+                value and "image_src" in value
+        }
+    )
+
+    if image_link:
+
+        href = (
+            image_link.get(
+                "href",
+                ""
+            ).strip()
+        )
+
+        if href:
+
+            return _absolute_site_url(
+                href
+            )
+
+    # --------------------------------------------------------
     # Основные классы изображения
     # --------------------------------------------------------
 
@@ -892,6 +960,8 @@ def _extract_article_image(
         "article-page__img",
         "news-card__image",
         "article-card__image",
+        "article-detail__image",
+        "article-detail__img",
     )
 
     for class_name in preferred_classes:
@@ -906,6 +976,7 @@ def _extract_article_image(
             src = (
                 image.get("src")
                 or image.get("data-src")
+                or image.get("data-lazy-src")
                 or ""
             ).strip()
 
@@ -916,7 +987,7 @@ def _extract_article_image(
                 )
 
     # --------------------------------------------------------
-    # srcset
+    # Любое изображение с srcset/src
     # --------------------------------------------------------
 
     for image in soup.find_all(
@@ -926,6 +997,11 @@ def _extract_article_image(
         srcset = (
             image.get(
                 "srcset",
+                ""
+            ).strip()
+            or
+            image.get(
+                "data-srcset",
                 ""
             ).strip()
         )
@@ -956,6 +1032,7 @@ def _extract_article_image(
         src = (
             image.get("src")
             or image.get("data-src")
+            or image.get("data-lazy-src")
             or ""
         ).strip()
 
@@ -976,7 +1053,10 @@ def _extract_article_description(
     soup: BeautifulSoup
 ) -> str:
 
+    # --------------------------------------------------------
     # meta description
+    # --------------------------------------------------------
+
     meta = soup.find(
         "meta",
         attrs={
@@ -999,7 +1079,10 @@ def _extract_article_description(
                 content
             )
 
+    # --------------------------------------------------------
     # og description
+    # --------------------------------------------------------
+
     meta = soup.find(
         "meta",
         attrs={
@@ -1022,8 +1105,13 @@ def _extract_article_description(
                 content
             )
 
+    # --------------------------------------------------------
     # Первый нормальный абзац
-    h1 = soup.find("h1")
+    # --------------------------------------------------------
+
+    h1 = soup.find(
+        "h1"
+    )
 
     if h1:
 
@@ -1043,6 +1131,27 @@ def _extract_article_description(
                 return _short_feed_description(
                     text
                 )
+
+    # --------------------------------------------------------
+    # Любой подходящий абзац
+    # --------------------------------------------------------
+
+    for element in soup.find_all(
+        "p"
+    ):
+
+        text = _clean_feed_text(
+            element.get_text(
+                " ",
+                strip=True
+            )
+        )
+
+        if len(text) >= 50:
+
+            return _short_feed_description(
+                text
+            )
 
     return ""
 
@@ -1092,6 +1201,104 @@ def _extract_article_date(
             return parsed
 
     # --------------------------------------------------------
+    # meta article:published_time
+    # --------------------------------------------------------
+
+    for meta_name in (
+        "article:published_time",
+        "datePublished",
+        "publish_date",
+        "publication_date",
+        "date",
+    ):
+
+        meta = soup.find(
+            "meta",
+            attrs={
+                "property": meta_name
+            }
+        )
+
+        if not meta:
+
+            meta = soup.find(
+                "meta",
+                attrs={
+                    "name": meta_name
+                }
+            )
+
+        if meta:
+
+            value = (
+                meta.get(
+                    "content",
+                    ""
+                ).strip()
+            )
+
+            parsed = _parse_article_date(
+                value
+            )
+
+            if parsed:
+                return parsed
+
+    # --------------------------------------------------------
+    # JSON-LD
+    # --------------------------------------------------------
+
+    for script in soup.find_all(
+        "script",
+        type="application/ld+json"
+    ):
+
+        try:
+
+            raw = script.string
+
+            if not raw:
+                continue
+
+            data = json.loads(
+                raw
+            )
+
+            objects = (
+                data
+                if isinstance(data, list)
+                else [data]
+            )
+
+            for item in objects:
+
+                if not isinstance(
+                    item,
+                    dict
+                ):
+                    continue
+
+                published = (
+                    item.get(
+                        "datePublished"
+                    )
+                    or
+                    item.get(
+                        "dateCreated"
+                    )
+                )
+
+                parsed = _parse_article_date(
+                    published or ""
+                )
+
+                if parsed:
+                    return parsed
+
+        except Exception:
+            continue
+
+    # --------------------------------------------------------
     # Ищем русскую дату в тексте
     # --------------------------------------------------------
 
@@ -1125,7 +1332,13 @@ def _extract_article_title(
     soup: BeautifulSoup
 ) -> str:
 
-    h1 = soup.find("h1")
+    # --------------------------------------------------------
+    # H1
+    # --------------------------------------------------------
+
+    h1 = soup.find(
+        "h1"
+    )
 
     if h1:
 
@@ -1138,6 +1351,10 @@ def _extract_article_title(
 
         if title:
             return title
+
+    # --------------------------------------------------------
+    # OpenGraph
+    # --------------------------------------------------------
 
     meta = soup.find(
         "meta",
@@ -1156,7 +1373,13 @@ def _extract_article_title(
         )
 
         if title:
-            return title
+            return _clean_feed_text(
+                title
+            )
+
+    # --------------------------------------------------------
+    # Title страницы
+    # --------------------------------------------------------
 
     if soup.title:
 
@@ -1183,6 +1406,7 @@ def _fetch_feed_article(
 
     article_url = article["url"]
     category = article["category"]
+    category_slug = article["category_slug"]
 
     try:
 
@@ -1224,6 +1448,10 @@ def _fetch_feed_article(
             )
         )
 
+        # Если дату не нашли,
+        # статья не попадёт в ленту,
+        # потому что невозможно корректно
+        # отсортировать её по свежести.
         if not published_at:
 
             print(
@@ -1244,6 +1472,7 @@ def _fetch_feed_article(
                 f"Своё Вино · {category}"
             ),
             "published_at": published_at,
+            "_category_slug": category_slug,
         }
 
     except Exception as e:
@@ -1263,71 +1492,38 @@ def _fetch_feed_article(
 
 def _load_feed_news():
 
-    # --------------------------------------------------------
-    # 1. Автоматически ищем подразделы
-    # --------------------------------------------------------
-
-    try:
-
-        categories = (
-            _discover_feed_categories()
-        )
-
-    except Exception as e:
-
-        print(
-            f"[FEED][CATEGORIES] "
-            f"Ошибка загрузки категорий: {e}",
-            flush=True
-        )
-
-        traceback.print_exc()
-
-        categories = []
-
-    # Если подразделы не нашли,
-    # всё равно пробуем главную страницу.
-    if not categories:
-
-        categories = [
-            {
-                "url":
-                    FEED_ARTICLES_CATEGORY_URL,
-                "name":
-                    "Статьи"
-            }
-        ]
+    print(
+        "[FEED][NEWS] Начинаем обновление новостей.",
+        flush=True
+    )
 
     # --------------------------------------------------------
-    # 2. Собираем URL статей
+    # 1. Загружаем страницы ВСЕХ 7 подразделов
     # --------------------------------------------------------
 
     category_articles = []
 
-    for category in categories:
+    with ThreadPoolExecutor(
+        max_workers=len(
+            FEED_ARTICLE_CATEGORIES
+        )
+    ) as executor:
 
-        try:
-
-            items = _fetch_category_articles(
-                category["url"],
-                category["name"]
+        category_results = list(
+            executor.map(
+                _fetch_category_articles,
+                FEED_ARTICLE_CATEGORIES
             )
+        )
 
-            category_articles.extend(
-                items
-            )
+    for items in category_results:
 
-        except Exception as e:
-
-            print(
-                f"[FEED][CATEGORY] "
-                f"Не удалось загрузить "
-                f"{category['url']}: {e}",
-                flush=True
-            )
+        category_articles.extend(
+            items
+        )
 
     # --------------------------------------------------------
-    # 3. Дедупликация
+    # 2. Дедупликация URL
     # --------------------------------------------------------
 
     unique_articles = {}
@@ -1346,93 +1542,30 @@ def _load_feed_news():
     if not candidates:
 
         raise RuntimeError(
-            "На странице "
-            f"{FEED_ARTICLES_CATEGORY_URL} "
-            "не найдено статей"
+            "Не удалось найти статьи "
+            "ни в одном из 7 подразделов "
+            "vino-svoe.ru"
         )
 
-    # --------------------------------------------------------
-    # 4. Группировка по подразделам
-    # --------------------------------------------------------
-
-    grouped = {}
-
-    for item in candidates:
-
-        grouped.setdefault(
-            item["category"],
-            []
-        ).append(
-            item
-        )
+    print(
+        f"[FEED][NEWS] "
+        f"Всего уникальных URL статей: "
+        f"{len(candidates)}",
+        flush=True
+    )
 
     # --------------------------------------------------------
-    # 5. Сначала берём по одной статье
-    #    из каждого подраздела
-    # --------------------------------------------------------
-
-    selected = []
-    selected_urls = set()
-
-    for category_name in sorted(
-        grouped.keys()
-    ):
-
-        category_items = grouped[
-            category_name
-        ]
-
-        if not category_items:
-            continue
-
-        item = category_items[0]
-
-        if item["url"] not in selected_urls:
-
-            selected.append(
-                item
-            )
-
-            selected_urls.add(
-                item["url"]
-            )
-
-    # --------------------------------------------------------
-    # 6. Добиваем список остальными статьями
-    # --------------------------------------------------------
-
-    for item in candidates:
-
-        if len(selected) >= (
-            FEED_NEWS_LIMIT * 2
-        ):
-            break
-
-        if item["url"] in selected_urls:
-            continue
-
-        selected.append(
-            item
-        )
-
-        selected_urls.add(
-            item["url"]
-        )
-
-    # --------------------------------------------------------
-    # 7. Загружаем страницы статей
-    #
-    # Только при обновлении cache.
+    # 3. Загружаем сами статьи
     # --------------------------------------------------------
 
     with ThreadPoolExecutor(
-        max_workers=8
+        max_workers=12
     ) as executor:
 
         results = list(
             executor.map(
                 _fetch_feed_article,
-                selected
+                candidates
             )
         )
 
@@ -1442,8 +1575,15 @@ def _load_feed_news():
         if item is not None
     ]
 
+    if not news:
+
+        raise RuntimeError(
+            "Не удалось получить "
+            "данные ни одной статьи"
+        )
+
     # --------------------------------------------------------
-    # 8. Финальная дедупликация
+    # 4. Финальная дедупликация
     # --------------------------------------------------------
 
     unique_news = {}
@@ -1460,10 +1600,132 @@ def _load_feed_news():
     )
 
     # --------------------------------------------------------
-    # 9. Самые новые сверху
+    # 5. Сортируем каждую категорию
+    #    от новых к старым
     # --------------------------------------------------------
 
-    news.sort(
+    grouped = {}
+
+    for item in news:
+
+        category_slug = (
+            item["_category_slug"]
+        )
+
+        grouped.setdefault(
+            category_slug,
+            []
+        ).append(
+            item
+        )
+
+    for category_slug in grouped:
+
+        grouped[
+            category_slug
+        ].sort(
+            key=lambda item:
+                item["published_at"],
+            reverse=True
+        )
+
+    # --------------------------------------------------------
+    # 6. Сначала гарантированно берём
+    #    по одной самой свежей статье
+    #    из КАЖДОГО подраздела
+    # --------------------------------------------------------
+
+    selected = []
+    selected_urls = set()
+
+    for category in FEED_ARTICLE_CATEGORIES:
+
+        category_slug = category[
+            "slug"
+        ]
+
+        category_items = grouped.get(
+            category_slug,
+            []
+        )
+
+        if not category_items:
+
+            print(
+                f"[FEED][NEWS] "
+                f"В подразделе "
+                f"{category['name']} "
+                f"не найдено подходящих статей.",
+                flush=True
+            )
+
+            continue
+
+        item = category_items[0]
+
+        if item["url"] not in selected_urls:
+
+            selected.append(
+                item
+            )
+
+            selected_urls.add(
+                item["url"]
+            )
+
+            print(
+                f"[FEED][NEWS] "
+                f"Добавлена обязательная статья "
+                f"из раздела "
+                f"{category['name']}: "
+                f"{item['title']}",
+                flush=True
+            )
+
+    # --------------------------------------------------------
+    # 7. Все остальные статьи сортируем
+    #    глобально по дате
+    # --------------------------------------------------------
+
+    remaining = [
+        item
+        for item in news
+        if item["url"] not in selected_urls
+    ]
+
+    remaining.sort(
+        key=lambda item:
+            item["published_at"],
+        reverse=True
+    )
+
+    # --------------------------------------------------------
+    # 8. Заполняем оставшиеся места
+    #    самыми свежими статьями
+    # --------------------------------------------------------
+
+    for item in remaining:
+
+        if len(selected) >= FEED_NEWS_LIMIT:
+            break
+
+        selected.append(
+            item
+        )
+
+        selected_urls.add(
+            item["url"]
+        )
+
+    # --------------------------------------------------------
+    # 9. Финальная сортировка
+    #
+    # В итоге даже обязательные статьи
+    # каждого раздела находятся согласно
+    # общей дате публикации.
+    # --------------------------------------------------------
+
+    selected.sort(
         key=lambda item:
             item["published_at"],
         reverse=True
@@ -1473,18 +1735,57 @@ def _load_feed_news():
     # 10. Ограничение
     # --------------------------------------------------------
 
-    news = news[
+    selected = selected[
         :FEED_NEWS_LIMIT
     ]
 
+    # --------------------------------------------------------
+    # 11. Удаляем внутреннее поле категории
+    # --------------------------------------------------------
+
+    for item in selected:
+
+        item.pop(
+            "_category_slug",
+            None
+        )
+
+    # --------------------------------------------------------
+    # 12. Логи распределения
+    # --------------------------------------------------------
+
+    category_counter = {}
+
+    for item in selected:
+
+        source = item["source"]
+
+        category_counter[source] = (
+            category_counter.get(
+                source,
+                0
+            ) + 1
+        )
+
     print(
-        f"[FEED][NEWS] "
+        "[FEED][NEWS] "
         f"Итоговое количество статей: "
-        f"{len(news)}",
+        f"{len(selected)}",
         flush=True
     )
 
-    for item in news:
+    for category_name, count in (
+        category_counter.items()
+    ):
+
+        print(
+            f"[FEED][NEWS] "
+            f"{category_name}: "
+            f"{count}",
+            flush=True
+        )
+
+    for item in selected:
 
         print(
             f"[FEED][NEWS] "
@@ -1494,7 +1795,7 @@ def _load_feed_news():
             flush=True
         )
 
-    return news
+    return selected
 
 
 # ============================================================
@@ -1571,8 +1872,6 @@ def _fetch_feed_wine(
             image_src
         )
 
-        # Если картинка относительная
-        # и должна идти через API vino-svoe.
         if image_src.startswith("/"):
             image_url = (
                 f"{IMAGE_BASE_URL}"
@@ -1681,6 +1980,11 @@ def _load_feed_wines():
 # ============================================================
 
 def _build_feed_response() -> bytes:
+
+    print(
+        "[FEED] Формируем новый payload.",
+        flush=True
+    )
 
     news = _load_feed_news()
     wines = _load_feed_wines()
