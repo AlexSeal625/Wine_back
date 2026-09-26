@@ -2339,7 +2339,12 @@ async def recognize_wine(
                     "не распознано"
                 )
             )
-
+        if similarity < 0.8:
+            print(f"[FILTER] Совпадение отброшено: Top-1 F1 ({similarity:.4f}) < 0.80", flush=True)
+            raise HTTPException(
+                status_code=404,
+                detail="Точного совпадения в базе не найдено"
+            )
         result = await asyncio.to_thread(
             fetch_wine_data,
             wine_id
