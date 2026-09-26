@@ -1975,29 +1975,106 @@ def find_by_slug(
         wine_image
     )
 
+def somelier(wine_slug):
+    wine_url = f"{SITE_BASE_URL}/wines/{wine_slug}"
 
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Referer": SITE_BASE_URL
+    }
+
+    recommended_wines = []
+
+    with requests.Session() as session:
+        session.headers.update(headers)
+        try:
+            response = session.get(wine_url, timeout=5)
+
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, "html.parser")
+                recommendation_cards = soup.find_all('a', class_='wine-item', limit=5)
+
+                for idx, card in enumerate(recommendation_cards, 1):
+                    # 1. Извлекаем название
+                    title_tag = card.find('h2', class_='wine-item__title') or card.find('p', class_='wine-item__title')
+                    title_text = title_tag.text.strip() if title_tag else f"Вино #{idx}"
+
+                    card_image_b64 = "Нет картинки"
+
+                    # 2. Ищем ТОЧНО тег картинки вина по классу 'wine-item__img'
+                    img_tag = card.find('img', class_='wine-item__img')
+
+                    # Если по классу не нашлось, ищем тег img внутри контейнера 'wine-item__img-container'
+                    if not img_tag:
+                        img_container = card.find('div', class_='wine-item__img-container')
+                        if img_container:
+                            img_tag = img_container.find('img')
+
+                    if img_tag:
+                        # 3. Берём srcset или src
+                        raw_src = img_tag.get('srcset') or img_tag.get('src')
+
+                        if raw_src:
+                            # Парсим srcset: берем вариант с максимальным разрешением (последний в списке)
+                            if ',' in raw_src:
+                                urls = [item.strip().split(' ')[0] for item in raw_src.split(',') if item.strip()]
+                                raw_src = urls[-1] if urls else raw_src
+                            elif ' ' in raw_src:
+                                raw_src = raw_src.split(' ')[0]
+
+                            # Собираем валидный адрес (в вашем HTML это абсолютный URL https://api.vino-svoe.ru/...)
+                            img_url = urljoin(SITE_BASE_URL, raw_src)
+
+                            try:
+                                time.sleep(0.1)
+                                img_res = session.get(img_url, timeout=4)
+
+                                if img_res.status_code == 200 and len(img_res.content) > 0:
+                                    b64_data = base64.b64encode(img_res.content).decode('utf-8')
+                                    card_image_b64 = f"data:image/webp;base64,{b64_data}"
+                                else:
+                                    print(f"[SITE #{idx}] Ошибка {img_res.status_code} по ссылке: {img_url}",
+                                          flush=True)
+
+                            except Exception as e:
+                                print(f"[SITE #{idx}] Ошибка скачивания картинки '{title_text}': {e}", flush=True)
+
+                    recommended_wines.append([title_text, card_image_b64])
+
+        except Exception as e:
+            print(f"[SITE] Не удалось распарсить страницу: {e}", flush=True)
+            traceback.print_exc()
+
+    if not recommended_wines:
+        recommended_wines = [["Нет информации", "Нет картинки"] for _ in range(5)]
+
+    return recommended_wines
 # ============================================================
 # FETCH WINE
 # ============================================================
 
-def fetch_wine_data(
-    wine_id
-):
+def fetch_wine_data(wine_id):
 
-    wine_slug = id_to_slug.get(
-        wine_id
-    )
+    wine_slug = id_to_slug.get(wine_id)
 
     if wine_slug is None:
-
         raise Exception(
-            f"Индекс {wine_id} есть "
-            f"в FAISS, но отсутствует "
-            f"в {MAPPING_FILE_PATH}"
+            f"Индекс {wine_id} есть в FAISS, "
+            f"но отсутствует в {MAPPING_FILE_PATH}"
         )
+    (
+        wine_url, wine_slug, description, wine_name, factory,
+        rate, atcc_list, num_list, dishes_list, wine_image
+    ) = find_by_slug(wine_slug)
 
-    return find_by_slug(
-        wine_slug
+    # Получаем сомелье-рекомендации
+    recommended_wines = somelier(wine_slug)
+
+    # Возвращаем ВСЕ 11 элементов единым плоским кортежем
+    return (
+        wine_url, wine_slug, description, wine_name, factory,
+        rate, atcc_list, num_list, dishes_list, wine_image, recommended_wines
     )
 
 
@@ -2006,117 +2083,45 @@ def fetch_wine_data(
 # ============================================================
 
 def parsed_info(
-    wine_url,
-    wine_slug,
-    description,
-    wine_name,
-    factory,
-    rate,
-    atcc_list,
-    num_list,
-    dishes_list,
-    wine_image
+    wine_url, wine_slug, description, wine_name, factory,
+    rate, atcc_list, num_list, dishes_list, wine_image, recommended_wines
 ):
 
-    def pick(
-        lst,
-        i
-    ):
-
-        return (
-            lst[i]
-            if len(lst) > i
-            else "Нет информации"
-        )
+    def pick(lst, i):
+        return lst[i] if len(lst) > i else "Нет информации"
 
     payload = {
-
         "status": "success",
-
         "url": wine_url,
-
         "parsed_data": {
-
-            "name":
-                wine_name,
-
-            "description":
-                description,
-
-            "factory":
-                factory,
-
-            "rate":
-                rate,
-
-            "area":
-                pick(
-                    atcc_list,
-                    0
-                ),
-
-            "sort":
-                pick(
-                    atcc_list,
-                    1
-                ),
-
-            "type":
-                pick(
-                    atcc_list,
-                    2
-                ),
-
-            "color":
-                pick(
-                    atcc_list,
-                    3
-                ),
-
-            "temperature":
-                pick(
-                    num_list,
-                    0
-                ),
-
-            "alcohol":
-                pick(
-                    num_list,
-                    1
-                ),
-
-            "dishes":
-                dishes_list,
-
-            "wine_image":
-                wine_image
+            "name": wine_name,
+            "description": description,
+            "factory": factory,
+            "rate": rate,
+            "area": pick(atcc_list, 0),
+            "sort": pick(atcc_list, 1),
+            "type": pick(atcc_list, 2),
+            "color": pick(atcc_list, 3),
+            "temperature": pick(num_list, 0),
+            "alcohol": pick(num_list, 1),
+            "dishes": dishes_list,
+            "wine_image": wine_image,
+            "top5": recommended_wines
         }
     }
 
-    json_bytes = json.dumps(
-        payload,
-        ensure_ascii=False
-    ).encode("utf-8")
+    json_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
-    print(
-        "[END] Запрос успешно обработан, "
-        "отправляем ответ.",
-        flush=True
-    )
+    print("[END] Запрос успешно обработан, отправляем ответ.", flush=True)
 
     return Response(
         content=json_bytes,
         media_type="application/json",
         headers={
-            "Content-Length":
-                str(
-                    len(json_bytes)
-                ),
-            "Cache-Control":
-                "no-transform"
+            "Content-Length": str(len(json_bytes)),
+            "Cache-Control": "no-transform"
         }
     )
-
 
 # ============================================================
 # /feed
