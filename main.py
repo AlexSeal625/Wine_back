@@ -548,7 +548,7 @@ def find_by_slug(wine_slug):
             if tag:
                 rate = tag.text.strip()
                 rate = float(rate.split()[-1])
-            else "Нет рейтинга"
+            else: "Нет рейтинга"
 
             # ATCC
             atcc_list = _unique_texts(
