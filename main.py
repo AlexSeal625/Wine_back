@@ -1013,47 +1013,26 @@ def _load_feed_wines():
 def _build_feed_response() -> bytes:
 
     news = _load_feed_news()
-
     wines = _load_feed_wines()
 
     if not news:
-        raise RuntimeError(
-            "Не удалось получить "
-            "новости для винной ленты"
-        )
+        raise RuntimeError("Не удалось получить новости для винной ленты")
 
     if not wines:
-        raise RuntimeError(
-            "Не удалось получить "
-            "вина для винной ленты"
-        )
+        raise RuntimeError("Не удалось получить вина для винной ленты")
 
     payload = FeedResponse(
         status="success",
-
         feed=FeedPayload(
-
-            news=[
-                FeedNewsItem(
-                    **item
-                )
-                for item in news
-            ],
-
-            wines=[
-                FeedWineItem(
-                    **item
-                )
-                for item in wines
-            ],
+            news=[FeedNewsItem(**item) for item in news],
+            wines=[FeedWineItem(**item) for item in wines],
         )
     )
 
-    # Сразу сериализуем в bytes.
-    #
-    # Поэтому при следующих запросах /feed
-    # FastAPI не собирает JSON заново.
-    return payload.json(
+    # Pydantic v2: .json(ensure_ascii=..., separators=...) больше не поддерживается,
+    # используем model_dump() + обычный json.dumps().
+    return json.dumps(
+        payload.model_dump(),
         ensure_ascii=False,
         separators=(",", ":")
     ).encode("utf-8")
