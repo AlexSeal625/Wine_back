@@ -66,9 +66,9 @@ cd Wine_back
 
 ```bash
 docker compose up --build
+```
 
 Запуска сервера вручную с пробросом портов после сборки всех контейнеров:
-
 ```bash
 docker compose run --rm --service-ports web python main.py
 ```
