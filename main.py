@@ -2346,6 +2346,12 @@ def is_wine_photo(
 # ML PIPELINE
 # ============================================================
 
+def sigmoid_f1_score(similarity: float, s0: float = 0.80, k: float = 15.0) -> float:
+    s = max(0.0, min(1.0, float(similarity)))
+    f1_val = 1.0 / (1.0 + math.exp(-k * (s - s0)))
+
+    return round(float(f1_val), 4)
+    
 def run_ml_pipeline(image, orig_w, orig_h, input_width, input_height):
 
     # 1. PIL -> NumPy -> BGR (YOLO ожидает BGR)
