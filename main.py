@@ -25,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+import math
 import torch
 import torch.nn.functional as F
 
@@ -2345,315 +2346,142 @@ def is_wine_photo(
 # ML PIPELINE
 # ============================================================
 
-def run_ml_pipeline(
-    image,
-    orig_w,
-    orig_h,
-    input_width,
-    input_height
-):
+def run_ml_pipeline(image, orig_w, orig_h, input_width, input_height):
 
-    img_np = np.array(
-        image
+    # 1. PIL -> NumPy -> BGR (YOLO ожидает BGR)
+    img_np = np.array(image)
+    img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+
+    # 2. Letterbox
+    input_tensor, scale, pad = letterbox_preprocess(
+        img_bgr, (input_width, input_height)
     )
 
-    img_bgr = cv2.cvtColor(
-        img_np,
-        cv2.COLOR_RGB2BGR
-    )
-
-    input_tensor, scale, pad = (
-        letterbox_preprocess(
-            img_bgr,
-            (
-                input_width,
-                input_height
-            )
-        )
-    )
-
-    outputs = session.run(
-        None,
-        {
-            input_name:
-                input_tensor
-        }
-    )
-
+    # 3. YOLO inference
+    outputs = session.run(None, {input_name: input_tensor})
     prediction = outputs[0]
 
+    # 4. Приводим prediction к форме (8400, N)
     pred = prediction[0]
 
-    if (
-        pred.shape[0]
-        <
-        pred.shape[1]
-    ):
-
+    if pred.shape[0] < pred.shape[1]:
         pred = pred.T
 
-    scores = np.max(
-        pred[:, 4:],
-        axis=1
-    )
+    # 5. Лучшая детекция
+    scores = np.max(pred[:, 4:], axis=1)
+    best_idx = np.argmax(scores)
+    best_score = float(scores[best_idx])
 
-    best_idx = np.argmax(
-        scores
-    )
+    print(f"[YOLO] Best confidence: {best_score:.4f}", flush=True)
 
-    best_score = float(
-        scores[best_idx]
-    )
-
-    print(
-        f"[YOLO] Best confidence: "
-        f"{best_score:.4f}",
-        flush=True
-    )
-
-    x_min = 0
-    y_min = 0
-    x_max = orig_w
-    y_max = orig_h
-
+    # 6. По умолчанию — всё фото
+    x_min, y_min, x_max, y_max = 0, 0, orig_w, orig_h
     box_detected = False
 
-    if (
-        best_score
-        >
-        YOLO_CONFIDENCE_THRESHOLD
-    ):
+    if best_score > YOLO_CONFIDENCE_THRESHOLD:
 
-        box = pred[
-            best_idx,
-            :4
-        ]
+        box = pred[best_idx, :4]
 
-        xc_model = (
-            box[0]
-            *
-            input_width
-        )
+        xc_model = box[0] * input_width
+        yc_model = box[1] * input_height
+        w_model = box[2] * input_width
+        h_model = box[3] * input_height
 
-        yc_model = (
-            box[1]
-            *
-            input_height
-        )
+        # XYWH -> XYXY
+        x1_model = xc_model - w_model / 2
+        y1_model = yc_model - h_model / 2
+        x2_model = xc_model + w_model / 2
+        y2_model = yc_model + h_model / 2
 
-        w_model = (
-            box[2]
-            *
-            input_width
-        )
-
-        h_model = (
-            box[3]
-            *
-            input_height
-        )
-
-        x1_model = (
-            xc_model
-            -
-            w_model / 2
-        )
-
-        y1_model = (
-            yc_model
-            -
-            h_model / 2
-        )
-
-        x2_model = (
-            xc_model
-            +
-            w_model / 2
-        )
-
-        y2_model = (
-            yc_model
-            +
-            h_model / 2
-        )
-
+        # убираем padding, возвращаемся к оригиналу
         dw, dh = pad
 
-        x1_orig = (
-            x1_model - dw
-        ) / scale
+        x1_orig = (x1_model - dw) / scale
+        y1_orig = (y1_model - dh) / scale
+        x2_orig = (x2_model - dw) / scale
+        y2_orig = (y2_model - dh) / scale
 
-        y1_orig = (
-            y1_model - dh
-        ) / scale
-
-        x2_orig = (
-            x2_model - dw
-        ) / scale
-
-        y2_orig = (
-            y2_model - dh
-        ) / scale
-
-        x_min = max(
-            0,
-            int(
-                np.clip(
-                    x1_orig,
-                    0,
-                    orig_w
-                )
-            )
-        )
-
-        y_min = max(
-            0,
-            int(
-                np.clip(
-                    y1_orig,
-                    0,
-                    orig_h
-                )
-            )
-        )
-
-        x_max = min(
-            orig_w,
-            int(
-                np.clip(
-                    x2_orig,
-                    0,
-                    orig_w
-                )
-            )
-        )
-
-        y_max = min(
-            orig_h,
-            int(
-                np.clip(
-                    y2_orig,
-                    0,
-                    orig_h
-                )
-            )
-        )
+        x_min = max(0, int(np.clip(x1_orig, 0, orig_w)))
+        y_min = max(0, int(np.clip(y1_orig, 0, orig_h)))
+        x_max = min(orig_w, int(np.clip(x2_orig, 0, orig_w)))
+        y_max = min(orig_h, int(np.clip(y2_orig, 0, orig_h)))
 
         box_detected = True
 
         print(
-            f"[YOLO] Этикетка найдена: "
-            f"({x_min},{y_min})-"
-            f"({x_max},{y_max})",
+            f"[YOLO] Этикетка найдена: ({x_min},{y_min})-({x_max},{y_max})",
             flush=True
         )
 
     else:
-
         print(
-            "[YOLO] Детекция не сработала "
-            "(низкая уверенность) — "
+            "[YOLO] Детекция не сработала (низкая уверенность) — "
             "используется полное фото",
             flush=True
         )
 
-    if (
-        box_detected
-        and x_max > x_min
-        and y_max > y_min
-    ):
+    # 7. Crop
+    if box_detected and x_max > x_min and y_max > y_min:
+        image = image.crop((x_min, y_min, x_max, y_max))
+        print("[YOLO] Кроп применён", flush=True)
 
-        image = image.crop(
-            (
-                x_min,
-                y_min,
-                x_max,
-                y_max
-            )
-        )
+    # 8. Debug
+    save_crop_for_debugging(image, label="dinov2_input")
 
-        print(
-            "[YOLO] Кроп применён",
-            flush=True
-        )
+    # 9. DINOv2 embedding
+    embedding = get_dinov2_embedding(image)
 
-    save_crop_for_debugging(
-        image,
-        label="dinov2_input"
-    )
+    print(f"[DINOv2] Embedding shape: {embedding.shape}", flush=True)
+    print(f"[DINOv2] Embedding norm: {np.linalg.norm(embedding):.4f}", flush=True)
 
-    embedding = (
-        get_dinov2_embedding(
-            image
-        )
-    )
-
-    print(
-        f"[DINOv2] Embedding shape: "
-        f"{embedding.shape}",
-        flush=True
-    )
-
-    print(
-        f"[DINOv2] Embedding norm: "
-        f"{np.linalg.norm(embedding):.4f}",
-        flush=True
-    )
-
-    if (
-        embedding.shape[0]
-        !=
-        index.d
-    ):
-
+    if embedding.shape[0] != index.d:
         raise RuntimeError(
-            f"Размерность embedding "
-            f"({embedding.shape[0]}) "
-            f"не совпадает с FAISS "
-            f"({index.d})."
+            f"Размерность embedding ({embedding.shape[0]}) "
+            f"не совпадает с FAISS ({index.d})."
         )
 
-    query = embedding.reshape(
-        1,
-        -1
-    )
+    # 10. FAISS (IndexFlatIP + нормализованные векторы = cosine similarity)
+    query = embedding.reshape(1, -1)
+    scores, indices = index.search(query, k=5)
 
-    scores, indices = index.search(
-        query,
-        k=1
-    )
+    top5_results = []
+    for idx, score in zip(indices[0], scores[0]):
+        if idx != -1:
+            raw_sim = float(score)
+            slug = id_to_slug.get(int(idx), "unknown")
 
-    wine_id = int(
-        indices[0][0]
-    )
+            # Считаем сигмоидальный F1-score
+            f1_val = sigmoid_f1_score(raw_sim, s0=0.80, k=15.0)
 
-    similarity = float(
-        scores[0][0]
-    )
+            top5_results.append({
+                "wine_id": int(idx),
+                "slug": slug,
+                "similarity": round(raw_sim, 4),
+                "f1_score": f1_val
+            })
 
-    print(
-        f"[FAISS] wine_id: "
-        f"{wine_id}",
-        flush=True
-    )
+    if not top5_results:
+        raise Exception("FAISS не нашёл совпадений")
 
-    print(
-        f"[FAISS] cosine similarity: "
-        f"{similarity:.4f}",
-        flush=True
-    )
+    # Извлекаем Топ-1 (главный кандидат)
+    top1 = top5_results[0]
+    wine_id = top1["wine_id"]
+    similarity = top1["similarity"]
 
-    if wine_id == -1:
+    # Формируем структуру метрик
+    metrics = {
+        "top1_f1": top1["f1_score"],
+        "top5_scores": [item["f1_score"] for item in top5_results],
+        "top5_candidates": top5_results
+    }
 
-        raise Exception(
-            "FAISS не нашёл совпадений"
-        )
+    print(f"[FAISS] Top-1 wine_id: {wine_id}", flush=True)
+    print(f"[FAISS] Top-1 cosine similarity: {similarity:.4f}", flush=True)
+    print(f"[FAISS] Top-1 F1-score (sigmoid): {top1['f1_score']:.4f}", flush=True)
+    print(f"[FAISS] Собран Топ-5 кандидатов.", flush=True)
 
-    return (
-        wine_id,
-        similarity,
-        box_detected
-    )
+    return wine_id, similarity, box_detected, metrics
+
 
 
 # ============================================================
