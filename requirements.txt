@@ -9,3 +9,5 @@ async-timeout
 opencv-python-headless
 onnxruntime>=1.18.0
 transformers
+pillow_heif
+python-multipart
