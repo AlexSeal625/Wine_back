@@ -3412,10 +3412,10 @@ async def recognize_wine(
 
             raise HTTPException(
                 status_code=404,
-                detail=(
-                    "Точного совпадения "
-                    "в базе не найдено"
-                )
+                detail={
+                    "message": "Точного совпадения в базе не найдено",
+                    "metrics": metrics
+                }
             )
 
         result = await asyncio.to_thread(
