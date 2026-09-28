@@ -3419,13 +3419,13 @@ async def recognize_wine(
                 )
             )
 
-        if similarity < 0.8:
+        if similarity < 0.4:
 
             print(
                 "[FILTER] Совпадение "
                 f"отброшено: "
                 f"Top-1 F1 "
-                f"({similarity:.4f}) < 0.80",
+                f"({similarity:.4f}) < 0.40",
                 flush=True
             )
 
