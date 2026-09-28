@@ -3185,7 +3185,20 @@ def parsed_info(
                 "no-transform"
         }
     )
+def memory_slug(wine_slug):
+    (
+        wine_url, wine_slug, description, wine_name, factory,
+        rate, atcc_list, num_list, dishes_list, wine_image
+    ) = find_by_slug(wine_slug)
 
+    # Получаем сомелье-рекомендации
+    recommended_wines = somelier(wine_slug)
+
+    # Возвращаем ВСЕ 11 элементов единым плоским кортежем
+    return (
+        wine_url, wine_slug, description, wine_name, factory,
+        rate, atcc_list, num_list, dishes_list, wine_image, recommended_wines
+    )
 
 # ============================================================
 # /feed
@@ -3355,7 +3368,7 @@ async def recognize_wine(
         (
             wine_id,
             similarity,
-            box_detected
+            box_detected, metrics
         ) = await asyncio.to_thread(
             run_ml_pipeline,
             image,
@@ -3463,9 +3476,8 @@ async def memory_wine(
 ):
 
     try:
-
         result = await asyncio.to_thread(
-            find_by_slug,
+            memory_slug,
             data.memory_slug
         )
 
@@ -3661,7 +3673,7 @@ async def test_by_slug(
         )
 
     payload = {
-        "wine_slug":
+        "slug":
             wine_slug
     }
 
