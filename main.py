@@ -2346,7 +2346,7 @@ def is_wine_photo(
 # ML PIPELINE
 # ============================================================
 
-def sigmoid_f1_score(similarity: float, s0: float = 0.80, k: float = 15.0) -> float:
+def sigmoid_f1_score(similarity: float, s0: float = 0.70, k: float = 15.0) -> float:
     s = max(0.0, min(1.0, float(similarity)))
     f1_val = 1.0 / (1.0 + math.exp(-k * (s - s0)))
 
@@ -2457,7 +2457,7 @@ def run_ml_pipeline(image, orig_w, orig_h, input_width, input_height):
             slug = id_to_slug.get(int(idx), "unknown")
 
             # Считаем сигмоидальный F1-score
-            f1_val = sigmoid_f1_score(raw_sim, s0=0.80, k=15.0)
+            f1_val = sigmoid_f1_score(raw_sim, s0=0.70, k=15.0)
 
             top5_results.append({
                 "wine_id": int(idx),
@@ -3631,12 +3631,12 @@ async def test_by_slug(
                 )
             )
 
-        if similarity < 0.8:
+        if similarity < 0.7:
             print(
                 "[FILTER] Совпадение "
                 f"отброшено: "
                 f"Top-1 F1 "
-                f"({similarity:.4f}) < 0.80",
+                f"({similarity:.4f}) < 0.70",
                 flush=True
             )
 
