@@ -3505,6 +3505,14 @@ async def memory_wine(
 async def test_by_slug(
     data: ImageTest
 ):
+    print(
+        "\n[START] Начало обработки",
+        flush=True
+    )
+
+    # --------------------------------------------------------
+    # BASE64 -> PIL
+    # --------------------------------------------------------
 
     try:
 
@@ -3529,64 +3537,113 @@ async def test_by_slug(
             image.size
         )
 
+        print(
+            f"[IMAGE] Фотку успешно "
+            f"декодировал. Размер: "
+            f"{image.size}",
+            flush=True
+        )
+
     except Exception as e:
 
         raise HTTPException(
             status_code=400,
             detail=(
-                "Некорректная base64 строка: "
-                f"{str(e)}"
+                "Не удалось прочитать "
+                f"base64 строку: {str(e)}"
             )
         )
 
+    # --------------------------------------------------------
+    # ML + mapping + site
+    # --------------------------------------------------------
+
     try:
+
+        print(
+            "[ML] Запуск YOLO + "
+            "DINOv2-reg + FAISS",
+            flush=True
+        )
 
         (
             wine_id,
-            distance,
-            _
+            similarity,
+            box_detected, metrics
         ) = await asyncio.to_thread(
             run_ml_pipeline,
             image,
             orig_w,
             orig_h,
-            640,
-            640
+            YOLO_INPUT_WIDTH,
+            YOLO_INPUT_HEIGHT
         )
 
-        conn = get_db_connection()
-
-        cursor = conn.cursor()
-
-        cursor.execute(
-            "SELECT wine_slug "
-            "FROM wines "
-            "WHERE id = %s;",
-            (wine_id,)
+        print(
+            f"[FAISS] Выдал ID: "
+            f"{wine_id}",
+            flush=True
         )
 
-        result = cursor.fetchone()
+        print(
+            f"[FAISS] Cosine similarity: "
+            f"{similarity:.4f}",
+            flush=True
+        )
 
-        cursor.close()
+        # Фильтр
 
-        conn.close()
-
-        if not result:
+        if not is_wine_photo(
+                similarity,
+                box_detected
+        ):
+            print(
+                "[FILTER] Фото отклонено "
+                "как не-вино: "
+                f"similarity={similarity:.4f}, "
+                f"box_detected={box_detected}",
+                flush=True
+            )
 
             raise HTTPException(
                 status_code=404,
                 detail=(
-                    f"Индекс {wine_id} найден "
-                    f"в FAISS, но отсутствует "
-                    f"в БД"
+                    "Вино на фото "
+                    "не распознано"
                 )
             )
 
-        wine_slug = result[0]
+        if similarity < 0.8:
+            print(
+                "[FILTER] Совпадение "
+                f"отброшено: "
+                f"Top-1 F1 "
+                f"({similarity:.4f}) < 0.80",
+                flush=True
+            )
 
-    except HTTPException as http_ex:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "message": "Точного совпадения в базе не найдено"
+                }
+            )
 
-        raise http_ex
+        result = await asyncio.to_thread(
+            fetch_wine_data,
+            wine_id
+        )
+        wine_slug = result[1]
+
+        print(
+            f"[MAPPING] Данные собраны. "
+            f"Slug: {result[1]}",
+            flush=True
+        )
+
+    except HTTPException:
+
+        raise
 
     except Exception as e:
 
@@ -3595,6 +3652,8 @@ async def test_by_slug(
             f"{str(e)}",
             flush=True
         )
+
+        traceback.print_exc()
 
         raise HTTPException(
             status_code=500,
