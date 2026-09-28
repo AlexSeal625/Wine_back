@@ -23,6 +23,7 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from fastapi import File, Form, UploadFile, Request
 from pydantic import BaseModel
 
 import math
@@ -3521,8 +3522,38 @@ async def memory_wine(
     "/api/test_for_slug"
 )
 async def test_by_slug(
-    data: ImageTest
+        request: Request,
+        file: UploadFile | None = File(None),
+        image_base64: str | None = Form(None)
 ):
+    try:
+        # Считываем входящие данные
+        if file is not None:
+            raw_data = await file.read()
+        elif image_base64 is not None:
+            raw_data = image_base64
+        else:
+            body = await request.body()
+            try:
+                json_data = await request.json()
+                raw_data = json_data.get("image_base64") or json_data.get("image")
+            except Exception:
+                raw_data = body
+
+        if not raw_data:
+            raise HTTPException(status_code=400, detail="Изображение не передано")
+
+        # Получаем чистый Base64 (в JPEG) и PIL-изображение
+        clean_base64, image = process_and_convert_to_base64(raw_data)
+
+        orig_w, orig_h = image.size
+
+        print(f"[IMAGE] Успешно переведено в Base64. Длина строки: {len(clean_base64)} символов", flush=True)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ошибка обработки изображения: {str(e)}"
+        )
     print(
         "\n[START] Начало обработки",
         flush=True
