@@ -2432,7 +2432,7 @@ def run_ml_pipeline(image, orig_w, orig_h, input_width, input_height):
         print("[YOLO] Кроп применён", flush=True)
 
     # 8. Debug
-    save_crop_for_debugging(image, label="dinov2_input")
+   
 
     # 9. DINOv2 embedding
     embedding = get_dinov2_embedding(image)
@@ -3419,13 +3419,13 @@ async def recognize_wine(
                 )
             )
 
-        if similarity < 0.4:
+        if similarity < 0.7:
 
             print(
                 "[FILTER] Совпадение "
                 f"отброшено: "
                 f"Top-1 F1 "
-                f"({similarity:.4f}) < 0.40",
+                f"({similarity:.4f}) < 0.70",
                 flush=True
             )
 
