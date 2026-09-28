@@ -3097,7 +3097,7 @@ def parsed_info(
     num_list,
     dishes_list,
     wine_image,
-    recommended_wines
+    recommended_wines, metrics = None
 ):
 
     def pick(
@@ -3110,10 +3110,21 @@ def parsed_info(
             if len(lst) > i
             else "Нет информации"
         )
+    top5_candidates = metrics.get("top5_candidates", []) if metrics else []
+
+    top5_short_list = [
+        {
+            "slug": c["slug"],
+            "similarity": c["similarity"],
+            "f1_score": c["f1_score"]
+        }
+        for c in top5_candidates
+    ]
 
     payload = {
         "status": "success",
         "url": wine_url,
+        "metrics": metrics or {},
         "parsed_data": {
             "name": wine_name,
             "description": description,
@@ -3437,9 +3448,7 @@ async def recognize_wine(
             detail=str(e)
         )
 
-    return parsed_info(
-        *result
-    )
+    return parsed_info(*result, metrics = metrics)
 
 
 # ============================================================
